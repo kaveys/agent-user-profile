@@ -484,7 +484,11 @@ const ACTION_ROUTE = '/user-profile/action'
       const keys = Object.keys(entries)
       if (keys.length === 0) return { ok: false, error: '缺少 entries' }
       for (const key of keys) {
-        const value = typeof entries[key] === 'string' ? entries[key] : JSON.stringify(entries[key])
+        const raw = entries[key]
+        // 字符串原样传（别 JSON.stringify：会把 1600 变成 "1600"，CLI 侧 Number() 变 NaN）
+        const value = typeof raw === 'string' ? raw
+          : typeof raw === 'number' || typeof raw === 'boolean' ? String(raw)
+          : JSON.stringify(raw)
         const result = runCli(['set', key, value])
         if (result.ok === false) return { ok: false, error: `${key}：${result.error}` }
       }

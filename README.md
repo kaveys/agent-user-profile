@@ -229,15 +229,19 @@ $CLI set capture.turnText false
 ## 自测与体检
 
 ```bash
-cd dsh-user-profile && node _selftest.mjs        # 端到端用例，隔离 temp HOME
-node _render.mjs                                 # 面板渲染烟测：7 个页签逐个点 + payload 洁净度，26 项断言
-node scripts/verify-install.mjs                  # 12 项安装体检（不重启、不起 dsh）
+node _selftest.mjs            # 注入 / 采集 / 提炼 的单元级用例（隔离 temp HOME）
+node _e2e.mjs                 # 35 项真实 CLI 与 HTTP 动作自检（会打运行中的 dsh）
+node _audit.mjs               # 28 项对抗式边界检查（脏输入 / 冲突操作 / 锁 / 作用域）
+node _render.mjs             # 面板渲染烟测：7 个页签逐个点 + payload 洁净度
+node scripts/verify-install.mjs   # 12 项安装体检（不重启、不起 dsh）
 ```
 
 `_selftest.mjs` 覆盖：空数据降级、证据不足不注入、两段式注入（核心段 + topK）、同轮不重复注入、
 喊停不注入但仍提示、作用域隔离、冲突 newest / freeze 两策略、待审候选进/不进画像、panel 权重降序与 rank、面板路由 401/405、
 工具名取自 `tool/call`、config 自动迁移、轮末自动重建、轮末模型提取（高置信入画像 / 低置信进待审 / 非法维度丢弃 / 无 request/header 时路由取自消息 source）、
 并发写不丢记录、陈旧锁自愈、同义去重、drift 一致性自检。
+
+`_audit.mjs` 专挑「看起来能用、边界会出血」的地方：删仍有条目的自定义大类、删内置大类、非法/越界/未知的配置写入、edit 到不存在的维度、merge 自己到自己、空事实、越界权重、未 init 的目录、重复 id 导入、restore 路径穿越、空库 build、`--all-scopes` 是否泄漏别的项目、陈旧锁自愈与新鲜锁不硬闯。
 
 `_render.mjs` 自带一个极简 hooks 运行时（`useState/useCallback/useEffect/createElement`），把**真实的 `ProfileSection`** 渲染成树，
 不需要浏览器也不依赖宿主 —— 面板改版后先跑它，能挡住「页签点了白屏」「字段读错路径」这类只有肉眼才发现的问题。

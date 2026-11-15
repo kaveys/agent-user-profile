@@ -30,6 +30,8 @@ const SYNC = [
   '.gitignore',
   'LICENSE',
   'docs/POSITIONING.md',
+  '_audit.mjs',
+  'docs/CHANGES-v13.md',
   'docs/CHANGES-v3.md',
   'docs/CHANGES-v3.1.md',
   'docs/CHANGES-v4.md', 'docs/CHANGES-v5.md', 'docs/CHANGES-v5.1.md', 'docs/CHANGES-v6.md', 'docs/CHANGES-v7.md', 'docs/CHANGES-v8.md', 'docs/CHANGES-v9.md', 'docs/CHANGES-v10.md', 'docs/CHANGES-v11.md', 'docs/CHANGES-v12.md',
