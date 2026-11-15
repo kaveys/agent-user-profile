@@ -4,9 +4,9 @@
 
 > 当前实现是 DeepSeek Harness（DSH）插件；核心（画像结构 / 准入门槛 / 三段式注入 / 快照回滚）与宿主解耦，CLI 单独可跑。
 
-[![tests](https://img.shields.io/badge/tests-selftest%20%2B%20e2e%20%2B%20render%20%2B%20install-4b8)](#自测与体检)
-[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![node](https://img.shields.io/badge/node-%3E%3D20-4b8)](package.json)
+[![tests](docs/badges/tests.svg)](#自测与体检) [![license](docs/badges/license.svg)](LICENSE) [![node](docs/badges/node.svg)](package.json)
+
+**[39 秒介绍短片](docs/video/intro.mp4)** · [English README](README.en.md)
 
 ## 这是什么
 
