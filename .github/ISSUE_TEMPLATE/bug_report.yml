@@ -1,0 +1,55 @@
+name: Bug report
+description: Something behaved differently from what the docs say.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先跑一遍下面两条命令，把输出贴进来（画像正文可以打码）：
+
+        ```bash
+        node bin/profile.mjs status
+        node bin/profile.mjs panel
+        ```
+  - type: dropdown
+    id: form
+    attributes:
+      label: 使用形态
+      options:
+        - DSH 插件（设置页 → 用户画像）
+        - 只跑 CLI（不装宿主）
+        - 两者都有
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么
+      description: 做了什么操作、期望什么、实际什么。
+      placeholder: |
+        我在设置页点了「批量删除」……
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: status / panel 输出
+      render: shell
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: package.json 里的 version，或 `git rev-parse --short HEAD`
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 自查
+      options:
+        - label: 我确认画像里已被删除的数据可以先用「备份与重置 → 恢复点」找回
+        - label: 我已经把 personal 的画像正文打码

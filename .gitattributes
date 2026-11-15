@@ -1,0 +1,6 @@
+# 本仓库不做行尾转换：截图和 .jsonl 快照都按原样存
+* -text
+*.png binary
+*.jpg binary
+*.webp binary
+*.mp4 binary

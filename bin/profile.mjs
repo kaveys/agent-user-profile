@@ -29,6 +29,9 @@ import { fileURLToPath } from 'node:url'
 const HOME = process.env.DSH_USER_PROFILE_HOME || join(homedir(), '.dsh', 'user-profile')
 const p = (...parts) => join(HOME, ...parts)
 
+/** 单次进程内的配置告警（配置损坏被重建时非空）；只用于向用户交代，不写进数据。 */
+let configWarnings = []
+
 /** 维度显示名：自定义维度优先，其次内置表，最后退回 id 本身。 */
 const labelOf = (dim, config) => config?.dimensionLabels?.[dim] ?? DIMENSION_LABELS[dim] ?? dim
 
@@ -314,6 +317,34 @@ function writeJson(file, value) {
   writeFileAtomic(file, `${JSON.stringify(value, null, 2)}\n`)
 }
 
+/**
+ * 把正文压成一个稳定的短指纹，用来当「没显式给 key」时的默认 key。
+ * 目的：同一句话反复记 → 命中同一条（更新 + 留历史）；
+ *      不同的话 → 各自成条。默认 key 取维度名会把后一条顶掉，等于静默丢数据。
+ */
+function factKey(text) {
+  let hash = 5381
+  const source = String(text ?? '').replace(/\s+/g, '')
+  for (let i = 0; i < source.length; i += 1) hash = ((hash << 5) + hash + source.charCodeAt(i)) >>> 0
+  return hash.toString(36)
+}
+
+/**
+ * - 整行 `## 标题` 会伪造出新的分段（注入块靠段标题决定「哪些是红线」）；
+ * - `<!--dsh-user-profile-->` 是插件的去重指纹，出现在正文里会让下一轮误判「已经注入过」；
+ * - 换行会把一条变成多条（列表项里塞进伪造的条目）。
+ * 只在渲染时消毒，磁盘上保留原话，避免改写用户数据。
+ */
+function safeText(text) {
+  return String(text ?? '')
+    .replace(/<!--\s*dsh-user-profile\s*-->/gi, '')
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+    .replace(/【插件规定】/g, '［插件规定］')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+}
+
 function readJsonl(file) {
   if (!existsSync(file)) return []
   const out = []
@@ -340,7 +371,23 @@ function writeJsonl(file, records) {
 
 function loadConfig() {
   const file = p('config.json')
-  const raw = readJson(file, {})
+  configWarnings = []
+  let raw = {}
+  if (existsSync(file)) {
+    const text = readFileSync(file, 'utf8')
+    if (text.trim().length > 0) {
+      try {
+        raw = JSON.parse(text)
+      } catch (error) {
+        // 配置坏了就没人守得住后面的写操作：先留证据，再用默认值重建一份，
+        // 否则每次命令都只能吃默认值，且写回时会把损坏内容彻底抹掉。
+        const backup = `${file}.corrupt-${Date.now()}`
+        try { copyFileSync(file, backup) } catch { /* 备份失败也要能继续 */ }
+        raw = {}
+        configWarnings.push(`配置文件损坏（${error.message}），已备份为 ${basename(backup)}，并按默认配置重建`)
+      }
+    }
+  }
   const merged = {
     ...DEFAULT_CONFIG,
     ...raw,
@@ -514,8 +561,13 @@ function cmdInit({ flags }) {
 
 function cmdDeclare({ flags }) {
   const dim = typeof flags.dim === 'string' ? flags.dim : 'taste'
-  const fact = typeof flags.fact === 'string' ? flags.fact.trim() : ''
-  if (fact.length === 0) die('缺少 --fact "要记录的内容"')
+  const rawFact = typeof flags.fact === 'string' ? flags.fact.trim() : ''
+  if (rawFact.length === 0) die('缺少 --fact "要记录的内容"')
+  // 一条画像应当是一句可复用的话。超长正文八成是把整段对话塞进来了：
+  // 截断并明确告知，比让它撑爆注入预算或静默丢进待审更诚实。
+  const MAX_FACT = 400
+  const truncated = rawFact.length > MAX_FACT
+  const fact = truncated ? `${rawFact.slice(0, MAX_FACT - 1)}…` : rawFact
   const config = loadConfig()
   if (!config.dimensions.includes(dim)) {
     die(`未知维度 ${dim}；可用：${config.dimensions.join(', ')}`)
@@ -527,7 +579,9 @@ function cmdDeclare({ flags }) {
     id: newId('dcl'),
     at: nowIso(),
     dim,
-    key: typeof flags.key === 'string' && flags.key.length > 0 ? flags.key : dim,
+    // 没给 key 时用「内容指纹」当 key：同一句话说第二遍会更新那一条，
+    // 不同的话各自成条。早前默认 key=维度名，同一大类里第二条会把第一条顶掉。
+    key: typeof flags.key === 'string' && flags.key.length > 0 ? flags.key : `${dim}.${factKey(fact)}`,
     fact: redact(fact, config),
     source,
     confidence: Math.min(1, Math.max(0, confidence)),
@@ -536,14 +590,15 @@ function cmdDeclare({ flags }) {
     scopeId: scopeKind === 'global' ? undefined : activeScope(flags, config).id,
     session: typeof flags.session === 'string' ? flags.session : undefined,
   }
+  const clampNote = truncated ? `\n（原文 ${rawFact.length} 字，超过 ${MAX_FACT} 字上限，已截断后记录）` : ''
   if (flags.pending === true) {
     appendJsonl(p('pending.jsonl'), record)
-    process.stdout.write(`已加入待审候选 [${dim}] ${record.fact}\n（确认：profile review --accept ${record.id}；或 review --accept all）\n`)
+    process.stdout.write(`已加入待审候选 [${dim}] ${record.fact}${clampNote}\n（确认：profile review --accept ${record.id}；或 review --accept all）\n`)
     return
   }
   appendJsonl(p('declarations.jsonl'), record)
   rebuildQuietly()
-  process.stdout.write(`已记录 [${dim}] ${record.fact}\n（画像已刷新）\n`)
+  process.stdout.write(`已记录 [${dim}] ${record.fact}${clampNote}\n（画像已刷新）\n`)
 }
 
 function cmdObserve({ flags }) {
@@ -859,7 +914,7 @@ function renderMarkdown(profile, config) {
       const core = isCore({ ...item, dim }, config) ? '核心 · ' : ''
       const frozen = item.frozen === true ? ' · 未决' : ''
       const scope = item.scope && item.scope !== 'global' ? ` · ${item.scope}${item.scopeId ? `:${item.scopeId}` : ''}` : ''
-      lines.push(`- [${core}${tag} ${round(item.weight ?? 0, 2)}${frozen}${scope}] ${item.text}`)
+      lines.push(`- [${core}${tag} ${round(item.weight ?? 0, 2)}${frozen}${scope}] ${safeText(item.text)}`)
     }
   }
   const openConflicts = (profile.conflicts ?? []).filter((c) => c.status !== 'resolved' && c.status !== 'merged')
@@ -916,7 +971,7 @@ function renderInject(profile, config) {
     const kind = item.kind === 'declared' ? '已确认' : '我的观察'
     const frozen = item.frozen === true ? ' ·未决' : ''
     const scope = item.scope && item.scope !== 'global' ? ` ·${item.scope}` : ''
-    return `- [${item.dimLabel} ${round(item.weight ?? 0, 2)}${frozen}${scope}·${kind}] ${item.text}`
+    return `- [${item.dimLabel} ${round(item.weight ?? 0, 2)}${frozen}${scope}·${kind}] ${safeText(item.text)}`
   }
 
   const total = redline.length + personalize.length + rest.length
@@ -1083,6 +1138,8 @@ function cmdPanel() {
     }
   const payload = {
     ok: true,
+    // 配置损坏时会在这里说一句：面板读到的可能不是用户原本的设置。
+    warnings: [...configWarnings],
     // 面板上的命令提示必须能直接复制执行：插件 bin 不在 PATH 里，别给裸命令名。
     cli: { node: process.execPath, script: fileURLToPath(import.meta.url) },
     config: {
@@ -1667,6 +1724,7 @@ function cmdStatus({ flags }) {
     lastObservation: observations.length > 0 ? observations[observations.length - 1].at : null,
     privacyMode: config.redaction.mode,
     injectChars: existsSync(p('inject.md')) ? readFileSync(p('inject.md'), 'utf8').length : 0,
+    warnings: [...configWarnings],
     // 画像里记的声明数 vs 磁盘实际条数：不等就是「画像过期」
     stale: profile !== undefined && typeof profile.stats?.declarations === 'number'
       ? profile.stats.declarations !== declarations
@@ -1688,6 +1746,7 @@ function cmdStatus({ flags }) {
     `注入正文     ${summary.injectChars} 字符`,
     ...(summary.stale ? ['一致性       画像已过期（声明数变了但没 build）→ 运行 build 刷新'] : []),
     `隐私模式     ${summary.privacyMode}`,
+    ...(summary.warnings ?? []).map((w) => `注意         ${w}`),
   ].join('\n') + '\n')
 }
 

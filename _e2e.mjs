@@ -247,6 +247,24 @@ const post = (body) => http('/user-profile/action', {
   body: JSON.stringify(body),
 })
 
+// B 段要打运行中的宿主。CI 里没有宿主：--cli-only 显式跳过，
+// 探不到端口时也自动跳过（否则 CI 会红在一个跟代码无关的地方）。
+const CLI_ONLY = process.argv.includes('--cli-only')
+if (CLI_ONLY) {
+  console.log(`\n[A 段] 通过 ${pass} 项，失败 ${fails.length} 项（--cli-only：跳过 HTTP 段）`)
+  if (fails.length) { for (const f of fails) console.log(' - ' + f); process.exitCode = 1 }
+  process.exit(process.exitCode ?? 0)
+}
+try {
+  const probe = await fetch(`${BASE}/user-profile/panel.json`)
+  if (!probe.ok && probe.status !== 401) throw new Error(`status ${probe.status}`)
+} catch (error) {
+  console.log(`\n[A 段] 通过 ${pass} 项，失败 ${fails.length} 项`)
+  console.log(`跳过 B 段（HTTP）：${BASE} 不可达（${error?.message ?? error}）`)
+  if (fails.length) { for (const f of fails) console.log(' - ' + f); process.exitCode = 1 }
+  process.exit(process.exitCode ?? 0)
+}
+
 const baseline = existsSync(join(HOME_DIR, 'declarations.jsonl'))
   ? readFileSync(join(HOME_DIR, 'declarations.jsonl'), 'utf8').split('\n').filter((l) => l.trim()).length
   : 0

@@ -1,0 +1,34 @@
+name: Feature request
+description: Something the portrait should do, or should stop doing.
+labels: [enhancement]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: 属于哪块
+      options:
+        - 录入门槛（什么该记、什么不该记）
+        - 注入策略（什么时候当主要依据、优先级）
+        - 条目管理（权重、合并、删除、恢复点）
+        - 面板与设置页
+        - 宿主适配（DSH 以外的 agent）
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你遇到的场景
+      description: 说场景，不要先说方案 —— 方案往往取决于场景里那一个细节。
+      placeholder: |
+        我每次让它写公众号开头，它都换一种语气，我得重复解释三遍……
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: 你希望它怎么做
+  - type: textarea
+    id: alternative
+    attributes:
+      label: 你现在怎么绕过这个问题

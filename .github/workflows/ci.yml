@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # 无依赖：不需要 npm install
+      - name: Syntax check
+        run: |
+          node --check index.js
+          node --check client.js
+          node --check bin/profile.mjs
+          node --check _selftest.mjs
+          node --check _e2e.mjs
+          node --check _audit.mjs
+          node --check _audit2.mjs
+          node --check _render.mjs
+
+      - name: Unit tests (storage / conflicts / injection)
+        run: node _selftest.mjs
+
+      - name: Adversarial audit
+        run: node _audit.mjs
+
+      - name: Adversarial audit 2 (corruption / round-trip / limits)
+        run: node _audit2.mjs
+
+      - name: Panel render smoke test
+        run: node _render.mjs
+
+      # _e2e.mjs 的 HTTP 段需要运行中的宿主；CI 只跑纯 CLI 段
+      - name: End-to-end (CLI only)
+        run: node _e2e.mjs --cli-only
+        continue-on-error: false
