@@ -1,0 +1,6 @@
+# dsh-user-profile — DSH profile bundle patch.
+# Registers the user-portrait capture + default-overlay plugin.
+# 数据目录默认 %USERPROFILE%\.dsh\user-profile（可用 DSH_USER_PROFILE_HOME 覆盖）。
+- insert:
+    - id: user-profile
+      name: 'dsh-user-profile'

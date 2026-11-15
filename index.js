@@ -1,0 +1,1113 @@
+/**
+ * dsh-user-profile — 用户画像的采集、注入与生命周期管理。
+ *
+ * 链路（requirements 1）：
+ *   采集  session/event('tool/result' | 'turn/start' | 'turn/end')  → 行为信号（结构化、不含对话正文）
+ *   接收  bin/profile.mjs declare                                   → 声明型事实（用户自述 / 模型经用户同意记录）
+ *   记录  %USERPROFILE%\.dsh\user-profile\observations\*.jsonl      → 只追加、按月分片
+ *   画像  bin/profile.mjs build → profile.json（结构化）+ profile.md（可注入渲染）
+ *   调用  agent/pre-step 注入画像块（每轮一次），用户显式喊停则跳过并提示声明
+ *
+ * 为什么注入不放在 AGENTS.md：AGENTS.md 是静态文件，画像每次任务后都可能变；
+ * 走 pre-step 才能做到「读最新、默认叠加、可单轮撤销」。
+ *
+ * 所有 IO 都包在 try/catch 里：插件绝不能因为画像坏了而挡住用户的正常任务。
+ */
+import { appendFileSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { execFile, execFileSync } from 'node:child_process'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { homedir, tmpdir } from 'node:os'
+
+export const name = 'dsh-user-profile'
+export const inject = ['loader']
+
+/** 注入块指纹：用于同一步骤内去重。 */
+const MARKER = '<!--dsh-user-profile-->'
+
+/**
+ * 画像十大类（与 bin/profile.mjs 的 DIMENSIONS 同源）。
+ * 划分依据：一类只回答一个问题 —— 他是谁 / 在哪做什么 / 会什么 / 何时怎么做事 /
+ * 喜欢什么 / 喜欢什么样 / 要达成什么 / 和谁 / 什么不能碰 / 要我怎么说。
+ */
+const DIMENSION_GUIDE = [
+  ['identity', '身份与背景', '称呼、年龄、性别、所在地与时区、母语、学校与专业、家庭角色'],
+  ['work', '学业与职业', '在读还是在职、行业与岗位、负责什么、所在团队与项目'],
+  ['skills', '能力与工具', '熟悉的技术栈、软件与语言、熟练程度、常用工具链'],
+  ['habits', '习惯与节奏', '作息与专注时段、做事方式、整理与备份习惯、更新与交付节奏'],
+  ['interests', '兴趣与爱好', '游戏、音乐、影视、阅读、运动、收藏、动手创作'],
+  ['taste', '审美与口味', '视觉风格、界面口味、内容偏好、品牌与产品喜好'],
+  ['goals', '目标与计划', '正在学什么、短期与长期目标、在推进的项目、时间点'],
+  ['social', '关系与协作', '和谁一起做事、团队里的角色、沟通对象、分享与公开习惯'],
+  ['constraints', '约束与红线', '禁忌与硬性要求、必须遵守的做法、不可触碰的话题或操作'],
+  ['communication', '沟通与表达', '回答长度与结构、语气、用什么语言、要不要表格/代码/清单'],
+]
+
+const DIMENSION_IDS = DIMENSION_GUIDE.map(([id]) => id)
+
+/** 提取器的系统提示。要点：只出 JSON、只收可跨会话复用的事实、无依据就返回空数组。 */
+const EXTRACT_SYSTEM = [
+  '你是用户画像提炼器。输入是一段用户与助手的对话，要求提炼出可以跨会话复用的稳定信息。',
+  '',
+  '这个画像只有一个用途：让下一次做事时更贴合这个人——选风格、定默认值、写文案、划边界、给推荐。',
+  '所以录入标准不是「这条信息有意思」，而是「知道它会不会让我下次做出来的东西更像他要的」。',
+  '',
+  '录入前的三道检查，三条全过才写：',
+  '1. 跨任务：换一个毫不相关的任务，这条还成立吗？「这次要改 client.js」「这轮先不要动配置」换任务就不成立 → 不写。',
+  '2. 有用：知道它会不会改变我下次的做法？「用户用 Windows」只有在能推出操作习惯时才算 → 写成「用户在 Windows 上开发插件」这类可用的说法。',
+  '3. 归属：说的是用户本人（口味、习惯、能力、目标、边界），不是这次的任务、文件、代码、报错、时间点。',
+  '',
+  '一律不要：本次/这一轮/当前任务的细节、文件名与路径、端口与版本号、报错原文、命令、一次性要求、临时约定。',
+  '',
+  '画像分十大类，一类只回答一个问题。只能落进这些大类：',
+  ...DIMENSION_GUIDE.map(([id, label, hint]) => '- ' + id + ' ' + label + '：' + hint),
+  '',
+  '分类最容易混的两对：',
+  '- work 是「在哪做什么」，skills 是「会什么」；学科与学校进 identity 的 school/major，岗位进 work。',
+  '- taste 是「喜欢什么样」（界面风格、内容口味），communication 是「要我怎么说」（长度、结构、语气、语言）。',
+  '- 会随项目变的东西进 goals，不要占用 identity。',
+  '',
+  '严格规则：',
+  '1. 必须能从对话中找到明确依据；一次性的任务细节、临时指令、文件名、路径、命令行、报错内容都不要。',
+  '2. 每条 fact 是一句自足的中文陈述，脱离上下文也读得懂，主语是「用户」，不超过 40 字。',
+  '3. key 写成「维度.细分」（小写英文，如 skills.editor、habits.hours、interests.game）；同类条目复用同一个 key，方便新值覆盖旧值。',
+  '3.1 输入里给了「已有画像条目」时，凡是同一件事（哪怕措辞不同）必须复用其中已有的 key，只更新 fact 文字；不要为同一件事新造 key。',
+  '4. confidence：用户明确说出的 0.9；从反复行为推断的 0.6；仅一次表现推断的 0.45。',
+  '5. scope：跨任务都成立的写 "global"；只在这个项目/工作区成立的写 "project"。**拿不准就写 project**——宁可少记，也别把项目细节写进用户画像。',
+  '6. 没有值得长期记住的内容，就返回 {"facts": []}。',
+  '',
+  '只输出 JSON，不要解释、不要 Markdown 代码块：',
+  '{"facts":[{"dim":"skills","key":"skills.editor","fact":"用户习惯用 VS Code 改代码","confidence":0.9,"scope":"global"}]}',
+].join('\n')
+
+/** 用户明确喊停时的替代注入（不含任何画像内容，只要求模型声明本次未用画像）。 */
+const SUPPRESS_NOTICE = [
+  '<system-reminder>',
+  `${MARKER}`,
+  '用户本轮明确要求不使用用户画像：本次不注入任何画像内容。',
+  '请在最终结果中原样说明一句「本次未结合用户画像」，然后完全按用户本轮指令执行。',
+  '</system-reminder>',
+].join('\n')
+
+const DEFAULT_CONFIG = {
+  schemaVersion: 3,
+  enabled: true,
+  inject: {
+    mode: 'always',
+    maxChars: 1600,
+    topK: 8,
+    coreDimensions: ['constraints', 'identity'],
+    // 个性化需求以这些维度为主要依据（与 CLI 的 personalizeDimensions 同源）
+    personalizeDimensions: ['taste', 'communication', 'habits', 'interests', 'goals'],
+    priorityOnPersonalize: true,
+    // 命中即判定「本轮需要个性化」，画像升级为主要依据
+    personalizePatterns: [
+      '个性化', '风格', '调性', '审美', '好看', '配色', '视觉', '排版', '界面', '布局',
+      '文案', '措辞', '语气', '口吻', '称呼我', '我的习惯', '按我的', '照我的', '我喜欢',
+      '推荐', '选型', '默认', '偏好', '口味', '定制', '适合我',
+    ],
+    announceSuppressed: true,
+    maxAgeDays: 30,
+    distillHint: true,
+  },
+  capture: { turnSignals: true, toolNames: true, userText: false, turnText: true },
+  // 智能提取：每轮结束把这轮对话压成几条可复用的画像事实。
+  // 正文绝不落盘（只在内存里拼成一次请求），落盘的只有提炼结果。
+  extract: {
+    enabled: true,
+    provider: '',
+    model: '',
+    everyTurns: 1,
+    minInputChars: 60,
+    maxInputChars: 6000,
+    maxFactsPerTurn: 5,
+    autoAcceptConfidence: 0.7,
+    // 只把「可能对全局有用」的写进画像；项目局部的一律丢（见 EXTRACT_SYSTEM 的三道检查）
+    requireGlobal: true,
+    timeoutMs: 45000,
+    maxOutputTokens: 900,
+    debugLog: false,
+  },
+  build: {
+    observedTtlDays: 90,
+    minEvidenceForPortrait: 3,
+    declaredWeight: 1,
+    observedWeight: 0.4,
+    autoBuild: true,
+    autoBuildMinIntervalMs: 60000,
+  },
+  conflicts: { strategy: 'newest' },
+  scope: { id: '' },
+  suppressPatterns: [
+    '不使用画像', '不要使用画像', '不用画像', '别用画像', '忽略画像', '不要结合画像',
+    '不结合画像', '不带画像', '不参考画像', '画像先放一边', '清空画像上下文',
+    'no profile', 'without profile', '--no-profile', 'ignore the profile',
+  ],
+}
+
+const home = () => process.env.DSH_USER_PROFILE_HOME || join(homedir(), '.dsh', 'user-profile')
+const p = (...parts) => join(home(), ...parts)
+
+/** 极简 mtime 缓存：画像和配置都可能在外部被 CLI 改写。 */
+function cached(file, parse) {
+  let stamp = -1
+  let value
+  return () => {
+    try {
+      const info = statSync(file)
+      if (info.mtimeMs !== stamp) {
+        stamp = info.mtimeMs
+        value = parse(readFileSync(file, 'utf8'))
+      }
+      return value
+    } catch {
+      stamp = -1
+      return undefined
+    }
+  }
+}
+
+const readConfig = cached(p('config.json'), (text) => {
+  const raw = JSON.parse(text)
+  return {
+    ...DEFAULT_CONFIG,
+    ...raw,
+    inject: { ...DEFAULT_CONFIG.inject, ...(raw.inject ?? {}) },
+    capture: { ...DEFAULT_CONFIG.capture, ...(raw.capture ?? {}) },
+    extract: { ...DEFAULT_CONFIG.extract, ...(raw.extract ?? {}) },
+    build: { ...DEFAULT_CONFIG.build, ...(raw.build ?? {}) },
+    suppressPatterns: Array.isArray(raw.suppressPatterns) && raw.suppressPatterns.length > 0
+      ? raw.suppressPatterns
+      : DEFAULT_CONFIG.suppressPatterns,
+  }
+})
+
+const readPortrait = cached(p('profile.json'), (text) => JSON.parse(text))
+// 注入正文优先用 build 预渲染的 inject.md（已做「核心必进 + 其余 topK」两段式预算），
+// 缺失时退回 profile.md（老版本产物，由 buildBlock 兜底截断）。
+const readInjectMd = cached(p('inject.md'), (text) => text)
+const readPortraitMd = cached(p('profile.md'), (text) => text)
+
+function portraitText() {
+  const inject = readInjectMd()
+  if (typeof inject === 'string' && inject.trim().length > 0) return { text: inject, source: 'inject.md' }
+  return { text: readPortraitMd(), source: 'profile.md' }
+}
+
+function config() {
+  return readConfig() ?? DEFAULT_CONFIG
+}
+
+/** 从 message 数组里取最后一条用户消息的纯文本。 */
+function lastUserText(messages) {
+  if (!Array.isArray(messages)) return ''
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i]
+    if (message?.role !== 'user') continue
+    const content = message.content
+    if (typeof content === 'string') return content
+    if (Array.isArray(content)) {
+      return content
+        .map((block) => (typeof block?.text === 'string' ? block.text : ''))
+        .join('\n')
+    }
+    return ''
+  }
+  return ''
+}
+
+function suppresses(text, patterns) {
+  if (typeof text !== 'string' || text.length === 0) return false
+  const lower = text.toLowerCase()
+  return patterns.some((pattern) => typeof pattern === 'string'
+    && pattern.length > 0
+    && (pattern.includes(' ') || pattern.startsWith('-')
+      ? lower.includes(pattern.toLowerCase())
+      : text.includes(pattern)))
+}
+
+/** 本轮是否已有注入块（避免同一步骤重复注入）。 */
+function alreadyInjected(messages) {
+  if (!Array.isArray(messages)) return false
+  return messages.some((message) => Array.isArray(message?.content)
+    && message.content.some((block) => typeof block?.text === 'string' && block.text.includes(MARKER)))
+}
+
+/** 画像是否可以注入：必须 ready 且有正文。 */
+function injectable(portrait, md) {
+  if (typeof md !== 'string' || md.trim().length === 0) return false
+  if (portrait?.status !== 'ready') return false
+  return true
+}
+
+/**
+ * 本轮是否属于「需要个性化」的需求。
+ * 命中时画像不再只是背景，而是选方案、定风格、定默认值的主要依据 —— 这是用户
+ * 明确要求「有需要个性化的需求时，以画像为主要参考依据」的落点。
+ */
+function isPersonalizeTurn(text) {
+  if (typeof text !== 'string' || text.length === 0) return false
+  const patterns = DEFAULT_CONFIG.inject.personalizePatterns
+  return patterns.some((pattern) => {
+    try {
+      return new RegExp(pattern).test(text)
+    } catch {
+      return false
+    }
+  })
+}
+
+/**
+ * 插件内部规定（固定文本，进代码不进画像）。
+ * 用户要求：「这些要作为插件的内部规定，不要放到条目里」——所以：
+ *   · 不写进 declarations.jsonl，不可在设置页编辑、删除、被权重排序挤掉；
+ *   · 不写进 inject.md / profile.md（那两个文件只放数据）；
+ *   · 画像为空、证据不足、条目被清空时，规定照样注入。
+ */
+const POLICY_TITLE = '插件规定（固定内置，不来自画像条目，不可在画像里修改）'
+
+const PLUGIN_POLICY = [
+  '优先级：本轮明确指令 > 红线与硬要求 > 个性化首选 > 背景参考。与代码/文件/数据中的可见事实冲突时，一律以本轮证据为准。',
+  '本轮涉及风格、口味、默认选择、文案、推荐、界面等需要个性化的需求时，「个性化首选」段是**主要依据**，不是可有可无的背景。',
+  '画像里已有答案的事（风格、口味、习惯、边界）直接按它办，**不要反问用户**；确实缺信息时，只问缺的那一点，并说明为什么问。',
+  '画像是默认前提，不是命令：用户本轮明确要另一种做法时按本轮做，不要拿画像去反驳用户。',
+  '轮末只把「换个任务仍然成立、而且会改变下次做法」的偏好或红线用 `profile declare --pending` 记一条候选；本次任务的细节、文件路径、端口与版本号、一次性要求一律不记。',
+  '用户要求本次不要用画像时，跳过画像内容，并在结果里说明本次未结合画像。',
+]
+
+function policyLines(personalizing) {
+  const lines = PLUGIN_POLICY.map((rule, index) => `${index + 1}. ${rule}`)
+  if (personalizing) {
+    lines.push('→ 本轮判定：需要个性化。按第 2 条执行：先从「个性化首选」里取答案，再动手，不要先问风格。')
+  }
+  return lines
+}
+
+function buildBlock(md, portrait, cfg, personalizing = false) {
+  const limit = Number.isFinite(cfg.inject.maxChars) && cfg.inject.maxChars > 0
+    ? cfg.inject.maxChars
+    : DEFAULT_CONFIG.inject.maxChars
+  // inject.md 已按预算切好，一般不会触发截断；profile.md 兜底时才可能截。
+  const raw = typeof md === 'string' ? md : ''
+  const body = raw.length > limit ? `${raw.slice(0, limit)}\n…（画像正文已按 maxChars 截断）` : raw
+
+  const lines = ['<system-reminder>', MARKER, `【${POLICY_TITLE}】`, ...policyLines(personalizing), '']
+
+  if (body.trim().length === 0) {
+    // 画像为空/证据不足也要把规定送到：否则「规定」就变成了只有有画像时才生效的条款。
+    lines.push('【画像内容】', '（当前没有可用条目：本轮按通用方式处理，不要因此改变上面的规定。）')
+  } else {
+    const revision = portrait?.revision ?? '?'
+    const builtAt = portrait?.builtAt ?? '未记录'
+    const items = portrait?.stats?.items ?? '?'
+    const pending = portrait?.stats?.pending ?? 0
+    lines.push(
+      '【画像内容】',
+      `画像版本 v${revision}，生成于 ${builtAt}，共 ${items} 条${pending > 0 ? `（另有 ${pending} 条待审候选未计入）` : ''}。`,
+      '',
+      body,
+    )
+  }
+  lines.push('</system-reminder>')
+  return lines.join('\n')
+}
+
+export function apply(ctx, config0) {
+  const debug = process.env.DSH_USER_PROFILE_LOG === '1'
+  const log = (...args) => {
+    if (debug) console.log('[dsh-user-profile]', ...args)
+  }
+
+  // ------------------------------------------------------------ 设置页面板的数据源
+  // 面板不自己算权重：直接借 CLI 的 `panel` 子命令，保证「页面看到的就是注入用的那份排序」。
+  const PANEL_ROUTE = '/user-profile/panel.json'
+const ACTION_ROUTE = '/user-profile/action'
+  const CLI_PATH = join(dirname(fileURLToPath(import.meta.url)), 'bin', 'profile.mjs')
+  let panelCache = { at: 0, body: '' }
+
+  function panelBody() {
+    const stamp = Date.now()
+    if (stamp - panelCache.at < 2000 && panelCache.body.length > 0) return panelCache.body
+    let body
+    try {
+      const out = execFileSync(process.execPath, [CLI_PATH, 'panel'], {
+        encoding: 'utf8',
+        timeout: 10000,
+        env: process.env,
+        windowsHide: true,
+      })
+      body = JSON.stringify(JSON.parse(out))
+    } catch (error) {
+      body = JSON.stringify({ ok: false, error: String(error?.message ?? error) })
+    }
+    panelCache = { at: stamp, body }
+    return body
+  }
+
+  function panelHandler(req, res) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      res.writeHead(405)
+      res.end()
+      return
+    }
+    try {
+      const body = panelBody()
+      res.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
+      })
+      res.end(req.method === 'HEAD' ? undefined : body)
+    } catch (error) {
+      log('panel route failed', error?.message)
+      res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ ok: false, error: String(error?.message ?? error) }))
+    }
+  }
+
+  // ------------------------------------------------------------ 面板写操作
+  // 面板不能只读：用户想加一条、删一条、裁决一条待审候选时，不该被逼回命令行。
+  // 这里只做「把面板表单翻译成 CLI 调用」这一件事，写入语义全部复用 CLI，
+  // 保证面板和命令行产生完全一样的数据（同一套校验、同一份审计）。
+  function runCli(args) {
+    try {
+      const out = execFileSync(process.execPath, [CLI_PATH, ...args], {
+        encoding: 'utf8',
+        timeout: 15000,
+        env: process.env,
+        windowsHide: true,
+      })
+      return { ok: true, output: String(out ?? '').trim() }
+    } catch (error) {
+      const detail = String(error?.stdout ?? '').trim() || String(error?.message ?? error)
+      return { ok: false, error: detail.slice(0, 500) }
+    }
+  }
+
+  const ACTIONS = {
+    declare(input) {
+      const dim = typeof input.dim === 'string' && input.dim.length > 0 ? input.dim : 'taste'
+      const fact = typeof input.fact === 'string' ? input.fact.trim() : ''
+      if (fact.length === 0) return { ok: false, error: '内容不能为空' }
+      const args = ['declare', '--dim', dim, '--fact', fact]
+      if (typeof input.key === 'string' && input.key.length > 0) args.push('--key', input.key)
+      if (input.core === true) args.push('--core')
+      if (input.pending === true) args.push('--pending')
+      return runCli(args)
+    },
+    forget(input) {
+      const args = ['forget']
+      if (input.all === true) args.push('--all')
+      else if (typeof input.id === 'string' && input.id.length > 0) args.push('--id', input.id)
+      else if (typeof input.key === 'string' && input.key.length > 0) args.push('--key', input.key)
+      else if (typeof input.dim === 'string' && input.dim.length > 0) args.push('--dim', input.dim)
+      else return { ok: false, error: '缺少 id / key / dim / all' }
+      if (input.pending === true) args.push('--pending')
+      return runCli(args)
+    },
+    edit(input) {
+      if (typeof input.id !== 'string' || input.id.length === 0) return { ok: false, error: '缺少 id' }
+      const args = ['edit', '--id', input.id]
+      if (typeof input.fact === 'string' && input.fact.trim().length > 0) args.push('--fact', input.fact.trim())
+      if (typeof input.dim === 'string' && input.dim.length > 0) args.push('--dim', input.dim)
+      if (typeof input.key === 'string' && input.key.length > 0) args.push('--key', input.key)
+      const weight = Number.isFinite(Number(input.weight)) ? Number(input.weight) : input.confidence
+      if (Number.isFinite(Number(weight))) args.push('--weight', String(Number(weight)))
+      if (input.core === true) args.push('--core', 'true')
+      if (input.core === false) args.push('--core', 'false')
+      return runCli(args)
+    },
+    review(input) {
+      const args = ['review']
+      if (typeof input.accept === 'string' && input.accept.length > 0) args.push('--accept', input.accept)
+      else if (typeof input.reject === 'string' && input.reject.length > 0) args.push('--reject', input.reject)
+      else return { ok: false, error: '缺少 accept / reject' }
+      return runCli(args)
+    },
+    restore(input) {
+      const name = typeof input.name === 'string' ? input.name : ''
+      // 只允许快照目录内的既有文件名：面板传来的字符串不能当路径用。
+      if (!/^declarations-[\w.-]+\.jsonl$/.test(name)) return { ok: false, error: '快照名不合法' }
+      return runCli(['restore', '--name', name])
+    },
+    set(input) {
+      if (typeof input.key !== 'string' || input.key.length === 0) return { ok: false, error: '缺少 key' }
+      return runCli(['set', input.key, String(input.value ?? '')])
+    },
+    dims(input) {
+      if (input.add === true) {
+        if (typeof input.id !== 'string' || typeof input.label !== 'string') return { ok: false, error: '缺少 id / label' }
+        return runCli(['dims', 'add', input.id, input.label])
+      }
+      if (input.remove === true) {
+        if (typeof input.id !== 'string') return { ok: false, error: '缺少 id' }
+        return runCli(['dims', 'remove', input.id])
+      }
+      return runCli(['dims', 'list'])
+    },
+    build() {
+      return runCli(['build', '--all-scopes'])
+    },
+    /** 手动合并两条声明：自动去重只认字面相似度，语义相同的还得人来判。 */
+    merge(input) {
+      if (typeof input.keep !== 'string' || typeof input.drop !== 'string') return { ok: false, error: '缺少 keep / drop' }
+      return runCli(['merge', '--keep', input.keep, '--drop', input.drop])
+    },
+    /** 粘贴 JSON 批量导入：CLI 只吃文件，所以先落一个临时文件再交给它。 */
+    importText(input) {
+      const items = Array.isArray(input.items) ? input.items : undefined
+      if (items === undefined) return { ok: false, error: '缺少 items 数组' }
+      const file = join(tmpdir(), `dsh-user-profile-import-${Date.now()}-${process.pid}.json`)
+      writeFileSync(file, JSON.stringify({ items }), 'utf8')
+      try {
+        return runCli(['import', '--file', file, ...(input.pending === true ? ['--pending'] : [])])
+      } finally {
+        try {
+          unlinkSync(file)
+        } catch {
+          // 临时文件删不掉不影响结果
+        }
+      }
+    },
+    export(input) {
+      const out = typeof input.out === 'string' && input.out.length > 0
+        ? input.out
+        : join(homedir(), '.dsh', 'user-profile', 'export', String(Date.now()))
+      return runCli(['export', '--out', out])
+    },
+    reset(input) {
+      if (input.confirm !== true) return { ok: false, error: '重置会归档并清空画像数据，需要 confirm: true' }
+      return runCli(['reset', '--yes'])
+    },
+    /** 设置页保存：一次提交多项，逐条 set 之后立刻 build，让画像和面板同步。 */
+    settings(input) {
+      const entries = input?.entries !== null && typeof input?.entries === 'object' ? input.entries : {}
+      const keys = Object.keys(entries)
+      if (keys.length === 0) return { ok: false, error: '缺少 entries' }
+      for (const key of keys) {
+        const value = typeof entries[key] === 'string' ? entries[key] : JSON.stringify(entries[key])
+        const result = runCli(['set', key, value])
+        if (result.ok === false) return { ok: false, error: `${key}：${result.error}` }
+      }
+      const build = runCli(['build', '--all-scopes'])
+      return {
+        ok: build.ok !== false,
+        output: `已更新 ${keys.length} 项设置${build.output ? `\n${build.output}` : ''}`,
+        error: build.ok === false ? build.error : undefined,
+      }
+    },
+  }
+
+  function actionHandler(req, res) {
+    const fail = (code, message) => {
+      res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      res.end(JSON.stringify({ ok: false, error: message }))
+    }
+    if (req.method !== 'POST') return fail(405, '只接受 POST')
+
+    let settled = false
+    const finish = (result) => {
+      if (settled) return
+      settled = true
+      panelCache = { at: 0, body: '' } // 写操作后让下一次 GET 读到新状态
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      res.end(JSON.stringify(result))
+    }
+
+    let raw = ''
+    req.on('data', (chunk) => {
+      raw += chunk
+      if (raw.length > 65536) {
+        if (settled) return
+        settled = true
+        req.destroy?.()
+        fail(413, '请求体过大')
+      }
+    })
+    req.on('error', (error) => fail(400, String(error?.message ?? error)))
+    req.on('end', () => {
+      if (settled) return
+      let input
+      try {
+        input = raw.length === 0 ? {} : JSON.parse(raw)
+      } catch {
+        return fail(400, '请求体不是合法 JSON')
+      }
+      const action = typeof input?.action === 'string' ? input.action : ''
+      const handler = ACTIONS[action]
+      if (handler === undefined) return fail(400, `未知动作 ${action}`)
+      try {
+        return finish(handler(input))
+      } catch (error) {
+        log('panel action failed', action, error?.message)
+        return finish({ ok: false, error: String(error?.message ?? error) })
+      }
+    })
+  }
+
+  // ------------------------------------------------------------ 自动重建画像
+  // 老版本只有 CLI 能 build：没人手动跑，profile.json 永远不存在 →
+  // 注入恒为空、面板恒为「未生成」，插件看起来完全没生效。
+  // 现在每轮落盘后异步补一次 build，三重保险：开关、最小间隔、失败静默。
+  let buildInFlight = false
+  let lastBuildAt = 0
+
+  function autoBuild() {
+    const cfg = config()
+    if (cfg.build?.autoBuild === false) return
+    if (buildInFlight) return
+    const minGap = Number(cfg.build?.autoBuildMinIntervalMs)
+    const gap = Number.isFinite(minGap) && minGap >= 0 ? minGap : DEFAULT_CONFIG.build.autoBuildMinIntervalMs
+    if (Date.now() - lastBuildAt < gap) return
+    buildInFlight = true
+    lastBuildAt = Date.now()
+    try {
+      // --all-scopes：自动重建是「给这个人的画像」，项目级声明也要算进来；
+      // 需要按项目看时手动跑 build --scope-id <名字>。
+      execFile(process.execPath, [CLI_PATH, 'build', '--all-scopes'], {
+        timeout: 20000,
+        env: process.env,
+        windowsHide: true,
+      }, (error, stdout, stderr) => {
+        buildInFlight = false
+        if (error) {
+          log('auto build failed', error.message, String(stderr ?? '').slice(0, 200))
+          return
+        }
+        log('auto build ok', String(stdout ?? '').split('\n')[0])
+        panelCache = { at: 0, body: '' } // 新画像立刻反映到设置页
+      })
+    } catch (error) {
+      buildInFlight = false
+      log('auto build spawn failed', error?.message)
+    }
+  }
+
+  // ------------------------------------------------------------ 智能提取画像事实
+  // 行为信号只能回答「他怎么干活」，回答不了「他是谁、要什么、不能碰什么」。
+  // 真正有价值的条目只能从对话语义里读出来：每轮结束用一次轻量模型调用，把这轮
+  // 对话压成若干条候选事实，写进 declarations（高置信）或 pending（待审）。
+  // 隐私边界：对话正文只在内存里拼成一次请求，永不落盘；落盘的只有提炼结果。
+  const turnText = new WeakMap()
+  const sessionRoute = new WeakMap()
+  const extracting = new WeakSet()
+  const turnCounter = new WeakMap()
+
+  let llmRef
+  if (typeof ctx.inject === 'function') {
+    try {
+      // 'llm' 是宿主模型服务；拿不到就退化成「只有行为信号」，不阻塞任务。
+      ctx.inject(['llm'], (inner) => { llmRef = inner?.llm })
+    } catch (error) {
+      log('llm service unavailable', error?.message)
+    }
+  }
+  const llmService = () => llmRef ?? ctx.llm
+
+  let llmModule
+  const dshLlm = async () => {
+    if (llmModule !== undefined) return llmModule
+    try {
+      const ns = await ctx.loader.import('@deepseek-ai/dsh-llm')
+      llmModule = ctx.loader.unwrapExports?.(ns) ?? ns
+    } catch (error) {
+      // 拿不到 dsh-llm 也要能提取：退化成纯文本流，不借用宿主的消息工厂。
+      log('dsh-llm unavailable for extract', error?.message)
+      llmModule = {}
+    }
+    return llmModule
+  }
+
+  const textOf = (message) => {
+    const content = Array.isArray(message?.content) ? message.content : []
+    return content
+      .filter((block) => block?.type === 'text' && typeof block.text === 'string')
+      .map((block) => block.text)
+      .join('\n')
+      .trim()
+  }
+
+  const pushTurnText = (session, who, text) => {
+    if (typeof text !== 'string' || text.length === 0) return
+    let buffer = turnText.get(session)
+    if (buffer === undefined) {
+      buffer = []
+      turnText.set(session, buffer)
+    }
+    if (buffer.length >= 40) return // 单轮上限，防长任务把请求撑爆
+    buffer.push({ who, text: text.slice(0, 4000) })
+  }
+
+  /** request/header 里带着本轮真正用的 provider/model，借它当提取器的路由（零配置）。 */
+  const rememberRoute = (session, event) => {
+    const header = event?.data?.header ?? event?.data ?? {}
+    const config0 = header?.config ?? {}
+    if (typeof config0.provider === 'string' && typeof config0.model === 'string') {
+      sessionRoute.set(session, { provider: config0.provider, model: config0.model })
+    }
+  }
+
+  /**
+   * 第二条路由来源：assistant 消息自带 source:{kind:'model',provider,model}。
+   * request/header 是 log-only 事件，未必进 session/event 钩子；这条几乎必然能拿到。
+   */
+  const rememberRouteFromSource = (session, event) => {
+    const source = event?.data?.message?.source ?? event?.data?.source
+    if (source?.kind === 'model'
+      && typeof source.provider === 'string'
+      && typeof source.model === 'string') {
+      sessionRoute.set(session, { provider: source.provider, model: source.model })
+    }
+  }
+
+  const DIMS = new Set(DIMENSION_IDS)
+
+  /**
+   * 这条事实是不是只对「这一次/这个项目」成立？
+   * 模型偶尔会把项目细节标成 global，这里做一道便宜的兜底：
+   * 命中就降级成 project —— project 只在同工作区生效，不会污染全局画像。
+   */
+  const SESSION_SCOPED = /(本次|这一轮|这轮|当前任务|刚才那|这个插件|这个文件|这个仓库|该文件|上面那个|临时|待会)/
+
+  /** 模型有时会包 Markdown 或加解释，这里做一次宽容解析；解析不出来就是没有事实。 */
+  const parseFacts = (raw) => {
+    let text = String(raw ?? '').trim()
+    const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/)
+    if (fence !== null) text = fence[1].trim()
+    const start = text.indexOf('{')
+    const end = text.lastIndexOf('}')
+    if (start >= 0 && end > start) text = text.slice(start, end + 1)
+    let data
+    try {
+      data = JSON.parse(text)
+    } catch {
+      return []
+    }
+    const list = Array.isArray(data) ? data : Array.isArray(data?.facts) ? data.facts : []
+    const facts = []
+    for (const item of list) {
+      if (typeof item?.fact !== 'string') continue
+      const fact = item.fact.trim().replace(/\s+/g, ' ')
+      if (fact.length < 4 || fact.length > 200) continue
+      const dim = DIMS.has(item.dim) ? item.dim : 'taste'
+      const parsed = Number(item.confidence)
+      const confidence = Number.isFinite(parsed) ? Math.min(1, Math.max(0, parsed)) : 0.6
+      const key = typeof item.key === 'string' && item.key.trim().length > 0
+        ? item.key.trim().slice(0, 40)
+        : undefined
+      // 准入：模型说 global 才可能进全局画像；说 project 一律留在这个工作区；
+      // 文本里明显带「本次/这个文件」这类词的，即使标 global 也降级。
+      const declared = item.scope === 'project' ? 'project' : 'global'
+      const scope = declared === 'global' && SESSION_SCOPED.test(fact) ? 'project' : declared
+      facts.push({ dim, fact, confidence, key, scope })
+    }
+    return facts
+  }
+
+  const writeFacts = (facts, minConfidence, requireGlobal = true) => {
+    let written = 0
+    for (const fact of facts) {
+      // 「只有可能应用到全局的才录入」：一次性的、只跟这个项目有关的一律不写进画像。
+      if (requireGlobal && fact.scope !== 'global') {
+        log('fact dropped (project-scoped)', fact.dim, fact.fact.slice(0, 40))
+        continue
+      }
+      const args = [
+        CLI_PATH, 'declare',
+        '--dim', fact.dim,
+        '--fact', fact.fact,
+        '--source', 'model',
+        '--confidence', String(fact.confidence),
+        '--scope', fact.scope === 'project' ? 'project' : 'global',
+      ]
+      if (fact.key !== undefined) args.push('--key', fact.key)
+      // 低置信的先进待审：面板上能看到，但默认不进注入，避免模型猜的东西污染画像。
+      if (fact.confidence < minConfidence) args.push('--pending')
+      try {
+        execFileSync(process.execPath, args, { encoding: 'utf8', timeout: 15000, env: process.env, windowsHide: true })
+        written += 1
+        log('fact', fact.dim, fact.confidence, fact.fact.slice(0, 40))
+      } catch (error) {
+        log('declare failed', error?.message)
+      }
+    }
+    return written
+  }
+
+  /** 一轮的语义提取。任何失败都只记日志：画像抽取永远不能影响用户的任务。 */
+  /**
+   * 把画像里已有的条目（dim/key/一句话）提供给提炼器，要求它复用同一个 key。
+   * 不这么做的直接后果：同一件事被反复换 key 重述，画像越用越肿
+   * ——实测出现过「每个插件只做一件事」与「不同插件职责分离」两条同义偏好并存。
+   */
+  function existingContext() {
+    const profile = readPortrait()
+    if (profile === undefined || profile?.dimensions === undefined) return ''
+    const rows = []
+    for (const [dim, section] of Object.entries(profile.dimensions)) {
+      for (const item of section?.items ?? []) {
+        if (typeof item?.key !== 'string' || typeof item?.text !== 'string') continue
+        rows.push(`- ${dim}/${item.key}：${item.text}`)
+      }
+    }
+    if (rows.length === 0) return ''
+    return `已有画像条目（同一件事必须复用这里的 key，文字可更新，key 不要新造）：\n${rows.join('\n')}\n\n`
+  }
+
+  async function extractTurn(session) {
+    const cfg = config()
+    const ex = { ...DEFAULT_CONFIG.extract, ...(cfg.extract ?? {}) }
+    if (ex.enabled === false) return
+    if (cfg.capture?.turnText === false) return
+
+    const buffer = turnText.get(session) ?? []
+    turnText.delete(session)
+    const turns = (turnCounter.get(session) ?? 0) + 1
+    turnCounter.set(session, turns)
+    const every = Number.isFinite(ex.everyTurns) && ex.everyTurns >= 1 ? ex.everyTurns : 1
+    if (turns % every !== 0) return
+    if (extracting.has(session)) return
+
+    const dialogue = buffer
+      .map((item) => `${item.who === 'user' ? '用户' : '助手'}：${item.text}`)
+      .join('\n\n')
+      .slice(0, ex.maxInputChars)
+    if (dialogue.length < ex.minInputChars) return
+
+    const route = sessionRoute.get(session)
+      ?? (typeof ex.provider === 'string' && ex.provider.length > 0 && typeof ex.model === 'string' && ex.model.length > 0
+        ? { provider: ex.provider, model: ex.model }
+        : undefined)
+    if (route === undefined) {
+      log('extract skipped: no route yet')
+      return
+    }
+    const llm = llmService()
+    if (llm === undefined || typeof llm.prepareCall !== 'function') {
+      log('extract skipped: no llm service')
+      return
+    }
+
+    extracting.add(session)
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), Number.isFinite(ex.timeoutMs) ? ex.timeoutMs : 45000)
+    try {
+      const mod = await dshLlm()
+      const createUserMessage = mod?.createUserMessage
+      const BlockAssembler = mod?.BlockAssembler
+      const call = await llm.prepareCall(
+        { ...route, maxTokens: ex.maxOutputTokens },
+        controller.signal,
+      )
+      const payload = `${existingContext()}对话片段：\n\n${dialogue}`
+      const messages = typeof createUserMessage === 'function'
+        ? [createUserMessage({
+          content: [{ type: 'text', text: payload }],
+          // 用自己的 source.kind 标识这条内部调用（与内置 title 插件同做法），
+          // 不冒充 agent-instructions，免得在下游被当成插件注入的"指令"。
+          source: { kind: 'dsh-user-profile' },
+        })]
+        : [{ role: 'user', content: [{ type: 'text', text: payload }] }]
+      const options = {
+        ...call.config,
+        messages,
+        system: EXTRACT_SYSTEM,
+        purpose: 'user-profile-extract',
+        signal: controller.signal,
+      }
+
+      let raw = ''
+      if (typeof BlockAssembler === 'function') {
+        const assembler = new BlockAssembler()
+        for await (const chunk of call.stream(options)) assembler.push(chunk)
+        raw = assembler.blocks()
+          .filter((block) => block?.type === 'text' && typeof block.text === 'string')
+          .map((block) => block.text)
+          .join('')
+      } else {
+        for await (const chunk of call.stream(options)) {
+          if (typeof chunk?.text === 'string') raw += chunk.text
+        }
+      }
+
+      const facts = parseFacts(raw).slice(0, Number.isFinite(ex.maxFactsPerTurn) ? ex.maxFactsPerTurn : 5)
+      if (facts.length === 0) {
+        log('extract: nothing reusable this turn')
+        return
+      }
+      const minConfidence = Number.isFinite(ex.autoAcceptConfidence) ? ex.autoAcceptConfidence : 0.7
+      if (writeFacts(facts, minConfidence, ex.requireGlobal !== false) === 0) return
+      // 立刻重建一次，下一轮 pre-step 就能读到大模型刚提炼出来的条目。
+      try {
+        execFileSync(process.execPath, [CLI_PATH, 'build', '--all-scopes'], {
+          encoding: 'utf8',
+          timeout: 20000,
+          env: process.env,
+          windowsHide: true,
+        })
+        panelCache = { at: 0, body: '' }
+      } catch (error) {
+        log('build after extract failed', error?.message)
+      }
+    } catch (error) {
+      log('extract failed', error?.message)
+    } finally {
+      clearTimeout(timer)
+      extracting.delete(session)
+    }
+  }
+
+  /** session -> { tools: Map<string, number>, ok: number, fail: number, steps: number, startedAt: number } */
+  const turnStats = new WeakMap()
+  /** session -> 需要在本轮 pre-step 注入 */
+  const pendingInject = new WeakSet()
+
+  const statsOf = (session) => {
+    let stats = turnStats.get(session)
+    if (stats === undefined) {
+      stats = { tools: new Map(), ok: 0, fail: 0, steps: 0, startedAt: Date.now() }
+      turnStats.set(session, stats)
+    }
+    return stats
+  }
+
+  /**
+   * 真实事件形状（0.2.2 会话日志实测）：
+   *   tool/call   → data = { turn, step, callId, name, arguments }   ← 工具名在这里
+   *   tool/result → data = { turn, step, message: { isError, content } } ← 没有工具名
+   * 老版本只看 event.tool/event.name，于是全都记成 'unknown'。
+   */
+  const toolNameOf = (event) => {
+    const data = event?.data ?? event ?? {}
+    const candidates = [
+      data.name,
+      data.tool,
+      data.toolName,
+      data.message?.name,
+      event?.name,
+      event?.tool,
+      event?.toolName,
+    ]
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && candidate.length > 0 && candidate !== 'unknown') return candidate
+    }
+    const block = Array.isArray(data.message?.content)
+      ? data.message.content.find((item) => item?.type === 'tool-call' && typeof item?.name === 'string')
+      : undefined
+    return block?.name ?? 'unknown'
+  }
+
+  const isError = (event) => {
+    const data = event?.data ?? event ?? {}
+    return Boolean(
+      data.message?.isError
+      ?? data.isError
+      ?? data.error
+      ?? data.result?.isError
+      ?? event?.isError,
+    )
+  }
+
+  /** 落盘一轮的聚合信号；任何异常都吞掉，绝不影响任务。 */
+  const flushTurn = (session) => {
+    const cfg = config()
+    if (cfg.capture?.turnSignals === false) return
+    const stats = turnStats.get(session)
+    if (stats === undefined) return
+    turnStats.delete(session)
+    const tools = [...stats.tools.entries()].sort((a, b) => b[1] - a[1]).slice(0, 24)
+    if (tools.length === 0 && stats.steps === 0) return
+    try {
+      const dir = p('observations')
+      mkdirSync(dir, { recursive: true })
+      const month = new Date().toISOString().slice(0, 7)
+      const record = {
+        at: new Date().toISOString(),
+        kind: 'turn',
+        tools: cfg.capture?.toolNames === false ? [] : tools.map(([tool, count]) => ({ tool, count })),
+        steps: stats.steps,
+        ok: stats.ok,
+        fail: stats.fail,
+        durationMs: Date.now() - stats.startedAt,
+      }
+      appendFileSync(join(dir, `${month}.jsonl`), `${JSON.stringify(record)}\n`, 'utf8')
+      log('turn flushed', record.tools.length, 'tools')
+    } catch (error) {
+      log('flush failed', error?.message)
+    }
+  }
+
+  ctx.on('session/event', (session, event) => {
+    try {
+      if (session === undefined) return
+      switch (event?.type) {
+        case 'turn/start':
+          pendingInject.add(session)
+          turnStats.delete(session)
+          turnText.delete(session)
+          statsOf(session)
+          break
+        case 'user/message':
+          // 只留文本块：工具调用参数、思考过程不算用户画像素材。
+          pushTurnText(session, 'user', textOf(event?.data?.message ?? event?.data))
+          break
+        case 'assistant/message':
+          pushTurnText(session, 'assistant', textOf(event?.data?.message ?? event?.data))
+          // 顺带取路由：assistant 消息的 source 里就写着本轮 provider/model。
+          rememberRouteFromSource(session, event)
+          break
+        case 'request/header':
+          rememberRoute(session, event)
+          break
+        case 'tool/call': {
+          // 每次调用记一次：名字从 tool/call 取，这是唯一带工具名的事件。
+          const stats = statsOf(session)
+          const tool = toolNameOf(event)
+          stats.steps += 1
+          stats.tools.set(tool, (stats.tools.get(tool) ?? 0) + 1)
+          break
+        }
+        case 'tool/result': {
+          // 成败看 result：tool/result 带 message.isError。
+          const stats = statsOf(session)
+          if (isError(event)) stats.fail += 1
+          else stats.ok += 1
+          break
+        }
+        case 'turn/end':
+          flushTurn(session)
+          // 有证据就重建画像：下一轮 pre-step 读到的就是刚 build 的版本。
+          // 纯聊天轮（没有工具调用）flushTurn 会提前返回，这里仍尝试一次，
+          // 保证首次使用时画像能被建起来而不是一直 missing。
+          autoBuild()
+          // 语义提取异步跑：不阻塞 turn/end，也不让模型慢/失败拖住用户任务。
+          void extractTurn(session).catch((error) => log('extract threw', error?.message))
+          break
+        default:
+          break
+      }
+    } catch (error) {
+      log('session/event failed', error?.message)
+    }
+  })
+
+  ctx.on('agent/pre-step', async (payload, next) => {
+    const decision = await next()
+    try {
+      if (decision?.kind === 'reject') return decision
+      const agent = payload?.agent
+      const session = agent?.session
+      const messages = Array.isArray(decision?.messages) ? decision.messages : []
+
+      const cfg = config()
+      if (cfg.enabled === false) return decision
+
+      // 画像只在每轮第一个可用步骤注入；turn/start 没来（老会话/resume）时退回 step===1。
+      const flagged = session !== undefined && pendingInject.has(session)
+      const firstStep = payload?.step === 1
+      let portraitBlock = ''
+      if ((flagged || firstStep) && !alreadyInjected(messages)) {
+        if (flagged) pendingInject.delete(session)
+        const portrait = readPortrait()
+        const { text: md, source: mdSource } = portraitText()
+        const userText = lastUserText(messages)
+        const optOut = suppresses(userText, cfg.suppressPatterns)
+        if (optOut) {
+          if (cfg.inject?.announceSuppressed === false) {
+            portraitBlock = ''
+          } else {
+            portraitBlock = SUPPRESS_NOTICE
+            log('suppressed by user request')
+          }
+        } else if (cfg.inject?.mode === 'on-request') {
+          // on-request：不主动叠加任何东西（连规定也要用户开口才注入）。
+          portraitBlock = ''
+        } else {
+          const personalizing = isPersonalizeTurn(userText) && cfg.inject.priorityOnPersonalize !== false
+          if (personalizing) log('personalize turn → profile as primary basis')
+          // 规定与数据分开：规定永远进，数据有多少带多少（没有就只带规定）。
+          const usable = injectable(portrait, md) ? md : ''
+          if (!usable) log('no profile items, injecting policy only', portrait?.status)
+          portraitBlock = buildBlock(usable, portrait, cfg, personalizing)
+          log('injected', usable ? mdSource : 'policy-only', `v${portrait?.revision}`)
+        }
+      }
+
+      const text = portraitBlock
+      if (text === '') return decision
+
+      let message
+      try {
+        const ns = await ctx.loader.import('@deepseek-ai/dsh-llm')
+        const mod = ctx.loader.unwrapExports?.(ns) ?? ns
+        const factory = mod?.createUserMessage ?? ns?.createUserMessage
+        if (typeof factory === 'function') {
+          message = factory({
+            content: [{ type: 'text', text }],
+            source: { kind: 'agent-instructions', form: 'instructions', changes: [] },
+          })
+        }
+      } catch (error) {
+        log('dsh-llm unavailable, fallback message', error?.message)
+      }
+      if (message === undefined) {
+        message = {
+          id: `dsh-user-profile-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          role: 'user',
+          content: [{ type: 'text', text }],
+          source: { kind: 'agent-instructions', form: 'instructions', changes: [] },
+        }
+      }
+      return { ...decision, messages: [...messages, message] }
+    } catch (error) {
+      log('pre-step failed', error?.message)
+      return decision
+    }
+  })
+
+  // 面板数据走同源 HTTP：client 插件（client.js）只负责渲染，不重复实现排序。
+  if (typeof ctx.inject === 'function') {
+    try {
+      ctx.inject(['webServer', 'connection'], (web, connection) => {
+        /**
+         * 面板里有画像正文，属于会话私有数据：先过 Web 宿主的鉴权闸门
+         * （cookie 网关 + Host/Origin fence），未授权的本机进程读不到。
+         */
+        const reject = (req, res) => {
+          try {
+            const status = connection?.requestRejection?.(req)
+            if (status === undefined) return false
+            res.statusCode = status
+            res.end()
+            return true
+          } catch (error) {
+            log('requestRejection failed, failing closed', error?.message)
+            res.statusCode = 500
+            res.end()
+            return true
+          }
+        }
+        web.effect(() => web.webServer.register({
+          kind: 'exact',
+          path: PANEL_ROUTE,
+          handler: (req, res) => {
+            if (reject(req, res)) return
+            panelHandler(req, res)
+          },
+        }), 'user-profile: panel route')
+
+        // 写操作走独立路径：GET 只读数据，POST 才改数据，语义不混在一条路由里。
+        web.effect(() => web.webServer.register({
+          kind: 'exact',
+          path: ACTION_ROUTE,
+          handler: (req, res) => {
+            if (reject(req, res)) return
+            actionHandler(req, res)
+          },
+        }), 'user-profile: panel action route')
+      })
+    } catch (error) {
+      // 没有 webServer（纯 CLI / 测试环境）时面板接口缺席，不影响画像注入。
+      log('webServer unavailable, panel route skipped', error?.message)
+    }
+  }
+}

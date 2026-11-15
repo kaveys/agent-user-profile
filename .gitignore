@@ -1,0 +1,24 @@
+# 忽略：依赖、备份、临时探针、本机数据
+node_modules/
+*.bak
+*.bak-*
+*.orig-*
+
+# 运行期数据不该进仓库（真实画像在本机 ~/.dsh/user-profile）
+user-profile/
+snapshots/
+archive/
+*.jsonl
+
+# 一次性探针脚本（写分析时用过就删，别提交）
+_beautify*.mjs
+_space*.mjs
+_peek*.mjs
+_scope.mjs
+_*.tmp
+
+# 抓包/导出的中间产物
+x-*.js
+x-*.ts
+*.log
+nul

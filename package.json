@@ -1,0 +1,62 @@
+{
+  "name": "dsh-user-profile",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Agent user-profile layer: distill durable preferences into a weighted portrait, overlay it on every task, and let the user opt out for a single turn.",
+  "keywords": [
+    "agent",
+    "agent-memory",
+    "user-profile",
+    "user-modeling",
+    "personalization",
+    "llm",
+    "prompt-context",
+    "coding-agent",
+    "deepseek-harness",
+    "dsh-plugin",
+    "memory-layer"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/OWNER/agent-user-profile#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OWNER/agent-user-profile.git"
+  },
+  "bugs": {
+    "url": "https://github.com/OWNER/agent-user-profile/issues"
+  },
+  "main": "index.js",
+  "bin": {
+    "dsh-profile": "./bin/profile.mjs"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "bin/profile.mjs",
+    "cordis.patch.yml",
+    "README.md",
+    "DESIGN.md",
+    "LICENSE",
+    "docs/POSITIONING.md"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
