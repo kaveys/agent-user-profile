@@ -63,7 +63,7 @@ client.js 对应新增：`AddForm`（维度下拉 + 内容输入 + 核心/待审
 改动在**工作区副本**里，安装副本要同步才生效：
 
 ```bash
-node "<home>\Desktop\DSH默认工作区\20261114-2354-用户画像插件\scripts\register.mjs"
+node "<repo>\scripts\register.mjs"
 ```
 
 `register.mjs` 现在先做「源码同步」（逐文件比对内容，只写有差异的），再注册 patch、再建 junction。

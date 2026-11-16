@@ -7,7 +7,7 @@
 路径前缀约定（下文一律用这两个缩写，均可在 shell 里直接展开）：
 
 - `<CHECKOUT>` = `<home>\AppData\Local\Programs\DeepSeek Harness\resources\app\dsh`
-- `<PLUGIN>` = `<home>\Desktop\DSH默认工作区\20261114-2354-用户画像插件`（本次工作区；镜像到 `~/.dsh/plugins/dsh-user-profile`）
+- `<PLUGIN>` = `<repo>`（本次工作区；镜像到 `~/.dsh/plugins/dsh-user-profile`）
 - `~` = `<home>`
 
 ---

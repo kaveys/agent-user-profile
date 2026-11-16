@@ -2,7 +2,7 @@
 # 关键约束：ffmpeg 8 的 filter 里不能出现未转义的盘符冒号，也不能用单引号包值。
 # 解决办法：所有素材（字体、文本、截图）复制进工作目录，用相对文件名引用，cwd 设为工作目录。
 $ErrorActionPreference = 'Stop'
-$root = '<home>\Desktop\DSH默认工作区\20261114-2354-用户画像插件'
+$root = '<repo>'
 $work = Join-Path $env:TEMP 'upvideo'
 $out  = Join-Path $root 'docs\video'
 New-Item -ItemType Directory -Force -Path $work, $out | Out-Null
