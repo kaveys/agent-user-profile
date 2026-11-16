@@ -21,6 +21,7 @@ import {
   renameSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs'
 import { basename, join } from 'node:path'
 import { homedir } from 'node:os'
@@ -154,15 +155,17 @@ function classifyLegacy(record) {
 }
 
 const DEFAULT_CONFIG = {
-  schemaVersion: 4,
+  schemaVersion: 5,
   // 默认叠加开关：true = 每次任务前注入画像
   enabled: true,
   inject: {
     // 'always' 默认叠加；'on-request' = 仅当用户在对话里要求时才注入（关闭默认叠加）
     mode: 'always',
-    // 注入正文预算；两段式分配：核心段最多占 70%，其余给按权重排序的 topK
-    maxChars: 1600,
-    topK: 8,
+    // 注入正文预算。0 = 不设上限（默认）：条目数是靠「有效性闸门」控制的，不是靠截断。
+    // 设成正数则作为**软**预算：超出时按优先级截尾，并在注入块里写明还剩几条没放下。
+    maxChars: 0,
+    // 兼容旧配置；0 = 不限制（旧版默认 8 条会把「背景参考」段的条目直接切掉）
+    topK: 0,
     // 这几个维度的条目一律视为「核心」：不受 topK 限制，优先进入注入块
     coreDimensions: ['constraints', 'identity'],
     // 个性化需求（风格、口味、默认选择、文案、推荐、界面）以这些维度为主要依据
@@ -199,7 +202,8 @@ const DEFAULT_CONFIG = {
   },
   // 隐私规则未确认前的保守默认：不做任何正则替换，只靠「不采集正文、只采集结构信号」把风险面压到最小。
   // 一旦（待补充：授权与隐私规则）确定，在这里加 patterns 即可，格式 { name, pattern, flags?, replace? }。
-  redaction: { mode: 'unknown', patterns: [] },
+  // 写入时脱敏（v15）：默认开启四类预设。mode 只说明来源，规则看 presets / patterns。
+  redaction: { mode: 'preset', presets: ['phone', 'email', 'idcard', 'secret'], patterns: [] },
   build: {
     observedTtlDays: 90,
     minEvidenceForPortrait: 3,
@@ -227,6 +231,24 @@ const DEFAULT_CONFIG = {
     // 项目作用域标识；留空则取当前工作目录名
     id: '',
   },
+  /**
+   * 备份（v15）：把导出包推到 WebDAV。
+   * 默认关闭 —— 没人愿意在自己不知情的时候往远端写数据。
+   * 密码永不进 config.json：只从环境变量（默认 DSH_PROFILE_WEBDAV_PASSWORD）
+   * 或 ~/.dsh/user-profile/secrets.json（建议 chmod 600）读取。
+   */
+  backup: {
+    webdav: {
+      enabled: false,
+      url: '',
+      username: '',
+      passwordEnv: 'DSH_PROFILE_WEBDAV_PASSWORD',
+      remoteDir: 'dsh-user-profile',
+      autoUploadOnBuild: false,
+      keepLast: 10,
+      timeoutMs: 20000,
+    },
+  },
   suppressPatterns: [
     '不使用画像', '不要使用画像', '不用画像', '别用画像', '忽略画像', '不要结合画像',
     '不结合画像', '不带画像', '不参考画像', '画像先放一边', '清空画像上下文',
@@ -238,6 +260,16 @@ const DEFAULT_CONFIG = {
 }
 
 // ---------------------------------------------------------------- 基础工具
+
+/**
+ * 同步睡一小段。
+ * 旧实现是 `while (Date.now() < until) {}` —— 空转，最坏 200 次 × 50ms = 10 秒占满一个核，
+ * 在笔记本上烫手、在 CI 里抢 CPU。Atomics.wait 是真正的阻塞等待，不烧 CPU。
+ */
+const sleepCell = new Int32Array(new SharedArrayBuffer(4))
+const sleepSync = (ms) => {
+  if (ms > 0) Atomics.wait(sleepCell, 0, 0, ms)
+}
 
 const nowIso = () => new Date().toISOString()
 const newId = (prefix) => `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
@@ -285,9 +317,12 @@ function withLock(fn, { tries = 200, waitMs = 50 } = {}) {
   }
   for (let i = 0; i < tries; i += 1) {
     try {
+      // 时间戳必须在「创建成功」的同一步写进去：
+      // 先 openSync('wx') 再 writeFileSync 中间有一个空档，别的进程会把空文件读成 0、
+      // 判成年老失锁并删掉，于是两个进程同时持锁（实测就是这么丢的数据）。
       const fd = openSync(lock, 'wx')
+      writeSync(fd, String(Date.now()))
       closeSync(fd)
-      writeFileSync(lock, String(Date.now()), 'utf8')
       // die() 走 process.exit，finally 不会执行：用 exit 钩子兜底。
       // 否则一次参数错误就能留下锁，把后面所有改写型命令全卡死。
       process.once('exit', release)
@@ -299,15 +334,17 @@ function withLock(fn, { tries = 200, waitMs = 50 } = {}) {
       }
     } catch (error) {
       if (error?.code !== 'EEXIST') throw error
-      // 陈旧锁：持有者崩在中间，超过 60s 视为失效
+      // 陈旧锁：持有者崩在中间，超过 60s 视为失效。
+      // 读不到数字（空文件/半截写入）一律按「刚创建」处理 —— 宁可多等 10 秒，
+      // 也不能把别人正持有的锁删掉：那等于没有锁。
       try {
-        const age = Date.now() - Number(readFileSync(lock, 'utf8'))
-        if (Number.isFinite(age) && age > 60000) unlinkSync(lock)
+        const stamp = Number(readFileSync(lock, 'utf8'))
+        const age = Date.now() - stamp
+        if (Number.isFinite(stamp) && stamp > 0 && age > 60000) unlinkSync(lock)
       } catch {
         // 读不到就继续等
       }
-      const until = Date.now() + waitMs
-      while (Date.now() < until) { /* 忙等一小段，避免再起定时器 */ }
+      sleepSync(waitMs)
     }
   }
   die(`另一个 profile 进程正持有锁（${lock}）；等它结束或删除该文件后重试`)
@@ -345,16 +382,96 @@ function safeText(text) {
     .trim()
 }
 
+/**
+ * 只有「我们自己写、且会被整表重写」的文件才可以就地修复；
+ * observations/ 是只追加的运行日志，坏了也不该在读取时改写它。
+ */
+const REPAIRABLE_JSONL = new Set(['declarations.jsonl', 'pending.jsonl'])
+
+/**
+ * 读 JSONL。
+ *
+ * 旧实现遇到坏行直接 continue —— 一条被编辑器改坏、或写到一半断电的记录，
+ * 会从画像里无声消失（这正是 CONTRIBUTING 里禁止的「静默丢数据」）。
+ * 现在：坏行进 <file>.bad-<日期> 隔离文件，好行照常使用；如果这个文件是我们
+ * 自己维护的（declarations / pending），顺手把好行原子写回，使坏行不再反复出现。
+ * 隔离失败也绝不中断读取 —— 读不出来比少一条更糟。
+ */
+/** 一条画像必须是「关于用户的一句可复用陈述」；不符合的一律拒绝入库，不留脏数据。 */
+const FACT_MIN_LEN = 3
+const FACT_MAX_LEN = 400
+const STRUCTURE_BREAKERS = /(<!--|-->|^\s{0,3}#{1,6}\s|【插件规定】)/m
+const TASK_SCOPED_HINTS = /(本次|这一轮|这轮|当前任务|刚才那|临时|待会|这个文件|这个仓库|该文件)/
+
+/**
+ * 有效性闸门（v15）。
+ *
+ * 用户的要求是「条数不设上限，但数据必须绝对有效」。所以这里不做数量上限，
+ * 而是每次写入都过一遍：结构上能不能安全渲染、是不是关于用户本人的跨任务陈述、
+ * 维度与置信度是否合法。拒绝时把**原因**逐条说出来，并留 `--force` 逃生门。
+ */
+function validateEntry(record, config) {
+  const reasons = []
+  const fact = typeof record?.fact === 'string' ? record.fact.trim() : ''
+  if (fact.length < FACT_MIN_LEN) reasons.push(`内容太短（${fact.length} 字，至少要 ${FACT_MIN_LEN} 字）`)
+  if (fact.length > FACT_MAX_LEN) reasons.push(`内容过长（${fact.length} 字，上限 ${FACT_MAX_LEN}）`)
+  if (STRUCTURE_BREAKERS.test(fact)) reasons.push('内容里有标题标记 / HTML 注释 / 伪造的规定段，会被渲染成别的结构')
+  if (/[\r\n]/.test(fact)) reasons.push('内容含换行，注入时会变成多条')
+  if (typeof record?.dim !== 'string' || !Array.isArray(config?.dimensions) || !config.dimensions.includes(record.dim)) {
+    reasons.push(`维度不合法（${record?.dim ?? '空'}）`)
+  }
+  const confidence = Number(record?.confidence)
+  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+    reasons.push(`置信度不在 0..1（${record?.confidence ?? '空'}）`)
+  }
+  if (typeof record?.key !== 'string' || record.key.trim().length === 0) reasons.push('缺少 key')
+  // 「本次任务的细节」只对 global 条目算问题：project 条目的存在意义就是项目内有效，
+  // 拿全局门槛去卡它，等于把 project 这一级直接废掉。
+  const scope = record?.scope === 'project' ? 'project' : 'global'
+  if (scope === 'global' && TASK_SCOPED_HINTS.test(fact)) {
+    reasons.push('这条读起来是本次任务的细节（含「本次 / 这一轮 / 临时」等词），换个任务就不成立了；确实只在当前项目有效就加 --scope project')
+  }
+  return { ok: reasons.length === 0, reasons }
+}
+
+function assertValid(record, config, flags = {}) {
+  const { ok, reasons } = validateEntry(record, config)
+  if (ok) return
+  if (flags.force === true) {
+    process.stderr.write(`dsh-profile: 已用 --force 强行写入 ${reasons.length} 项问题：${reasons.join('；')}\n`)
+    return
+  }
+  die(`这条不适合进画像（加 --force 可强行写入）：\n  - ${reasons.join('\n  - ')}`)
+}
+
 function readJsonl(file) {
   if (!existsSync(file)) return []
   const out = []
+  const bad = []
   for (const line of readFileSync(file, 'utf8').split('\n')) {
     const trimmed = line.trim()
     if (trimmed.length === 0) continue
     try {
       out.push(JSON.parse(trimmed))
     } catch {
-      // 坏行跳过：宁可少一条，也不要整个画像构建失败
+      bad.push(trimmed)
+    }
+  }
+  if (bad.length > 0) {
+    const name = basename(file)
+    if (REPAIRABLE_JSONL.has(name)) {
+      const dump = `${file}.bad-${new Date().toISOString().slice(0, 10)}`
+      try {
+        appendFileSync(dump, `${bad.join('\n')}\n`, 'utf8')
+        writeFileAtomic(file, out.map((r) => JSON.stringify(r)).join('\n') + (out.length > 0 ? '\n' : ''))
+        configWarnings.push(
+          `${name} 有 ${bad.length} 行损坏，已隔离到 ${basename(dump)}（其余 ${out.length} 条照常使用）`,
+        )
+      } catch {
+        configWarnings.push(`${name} 有 ${bad.length} 行损坏，且隔离失败（不影响读取到的 ${out.length} 条）`)
+      }
+    } else {
+      configWarnings.push(`${name} 有 ${bad.length} 行损坏，已跳过（该文件只读，未改写）`)
     }
   }
   return out
@@ -396,9 +513,22 @@ function loadConfig() {
     inject: { ...DEFAULT_CONFIG.inject, ...(raw.inject ?? {}) },
     capture: { ...DEFAULT_CONFIG.capture, ...(raw.capture ?? {}) },
     build: { ...DEFAULT_CONFIG.build, ...(raw.build ?? {}) },
-    redaction: { ...DEFAULT_CONFIG.redaction, ...(raw.redaction ?? {}) },
+    redaction: {
+      ...DEFAULT_CONFIG.redaction,
+      ...(raw.redaction ?? {}),
+      // 老配置里没有 presets：给上默认预设，否则「脱敏」这个词等于没实现
+      presets: Array.isArray(raw?.redaction?.presets)
+        ? raw.redaction.presets
+        : DEFAULT_CONFIG.redaction.presets,
+      patterns: Array.isArray(raw?.redaction?.patterns) ? raw.redaction.patterns : [],
+    },
     conflicts: { ...DEFAULT_CONFIG.conflicts, ...(raw.conflicts ?? {}) },
     scope: { ...DEFAULT_CONFIG.scope, ...(raw.scope ?? {}) },
+    backup: {
+      ...DEFAULT_CONFIG.backup,
+      ...(raw.backup ?? {}),
+      webdav: { ...DEFAULT_CONFIG.backup.webdav, ...(raw?.backup?.webdav ?? {}) },
+    },
     suppressPatterns: Array.isArray(raw.suppressPatterns) && raw.suppressPatterns.length > 0
       ? raw.suppressPatterns
       : DEFAULT_CONFIG.suppressPatterns,
@@ -413,6 +543,18 @@ function loadConfig() {
     merged.dimensions = raw.dimensions
   } else {
     merged.dimensions = [...BUILTIN_DIMENSION_IDS]
+  }
+  // v5：「条数不设上限，质量靠闸门」。老配置里那两个数是我们自己的旧默认值，
+  // 不是用户选的 —— 不清掉它们，新默认值永远不生效，用户会以为改动没上线。
+  if (rawVersion < 5) {
+    if (Number(merged.inject?.maxChars) === 1600) merged.inject.maxChars = 0
+    if (Number(merged.inject?.topK) === 8) merged.inject.topK = 0
+    if (merged.redaction?.mode === 'unknown') {
+      merged.redaction.mode = 'preset'
+      if (!Array.isArray(merged.redaction.presets) || merged.redaction.presets.length === 0) {
+        merged.redaction.presets = [...DEFAULT_CONFIG.redaction.presets]
+      }
+    }
   }
   migrateConfig(file, raw, merged)
   return merged
@@ -469,19 +611,61 @@ function saveConfig(config) {
 }
 
 /** 按（待补充：隐私规则）预留的脱敏钩子；规则未配置时原样返回。 */
-function redact(text, config) {
-  if (typeof text !== 'string') return ''
-  const patterns = Array.isArray(config?.redaction?.patterns) ? config.redaction.patterns : []
+/**
+ * 内置脱敏预设（v15）。
+ *
+ * 之前 redaction.patterns 是空数组——字段摆在那儿却什么都没做，等于「说好了要脱敏」。
+ * 现在默认开启四类最常被顺手粘进对话的东西；命中就替换成 ⟨手机号⟩ 这样的占位符，
+ * 并在回执里告诉用户「已脱敏 N 处」，而不是悄悄改掉。
+ *
+ * 注意：这是**写入时**的脱敏，只管新记录；已有记录用 `profile redact --apply` 批量清洗。
+ */
+const REDACTION_PRESETS = {
+  phone: { label: '手机号', pattern: '(?<!\\d)1[3-9]\\d{9}(?!\\d)', replace: '⟨手机号⟩' },
+  email: { label: '邮箱', pattern: '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}', replace: '⟨邮箱⟩' },
+  idcard: { label: '证件号', pattern: '(?<!\\d)\\d{17}[\\dXx](?!\\d)', replace: '⟨证件号⟩' },
+  secret: {
+    label: '密钥',
+    pattern: '(sk-[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,})',
+    replace: '⟨密钥⟩',
+  },
+}
+
+/** 逐条正则替换；返回换了多少处（0 表示这条内容是干净的）。 */
+function redactWithCount(text, config) {
+  if (typeof text !== 'string') return { text: '', hits: 0 }
   let out = text
+  let hits = 0
+  const presets = Array.isArray(config?.redaction?.presets) ? config.redaction.presets : []
+  for (const id of presets) {
+    const preset = REDACTION_PRESETS[id]
+    if (!preset) continue
+    try {
+      out = out.replace(new RegExp(preset.pattern, 'g'), () => {
+        hits += 1
+        return preset.replace
+      })
+    } catch {
+      // 预设写错不影响采集
+    }
+  }
+  const patterns = Array.isArray(config?.redaction?.patterns) ? config.redaction.patterns : []
   for (const rule of patterns) {
     if (typeof rule?.pattern !== 'string') continue
     try {
-      out = out.replace(new RegExp(rule.pattern, rule.flags ?? 'g'), rule.replace ?? '[已脱敏]')
+      out = out.replace(new RegExp(rule.pattern, rule.flags ?? 'g'), () => {
+        hits += 1
+        return rule.replace ?? '[已脱敏]'
+      })
     } catch {
       // 规则写错不影响采集
     }
   }
-  return out
+  return { text: out, hits }
+}
+
+function redact(text, config) {
+  return redactWithCount(text, config).text
 }
 
 // ---------------------------------------------------------------- 作用域与排序
@@ -575,6 +759,8 @@ function cmdDeclare({ flags }) {
   const source = flags.source === 'model' ? 'model' : 'user'
   const confidence = Number.isFinite(Number(flags.confidence)) ? Number(flags.confidence) : (source === 'user' ? 1 : 0.6)
   const scopeKind = typeof flags.scope === 'string' && flags.scope.length > 0 ? flags.scope : 'global'
+  // 写入时脱敏：命中手机号/邮箱/证件号/密钥就替换成占位符，并把命中次数写进回执。
+  const cleaned = redactWithCount(fact, config)
   const record = {
     id: newId('dcl'),
     at: nowIso(),
@@ -582,23 +768,34 @@ function cmdDeclare({ flags }) {
     // 没给 key 时用「内容指纹」当 key：同一句话说第二遍会更新那一条，
     // 不同的话各自成条。早前默认 key=维度名，同一大类里第二条会把第一条顶掉。
     key: typeof flags.key === 'string' && flags.key.length > 0 ? flags.key : `${dim}.${factKey(fact)}`,
-    fact: redact(fact, config),
+    fact: cleaned.text,
     source,
     confidence: Math.min(1, Math.max(0, confidence)),
     core: flags.core === true,
     scope: scopeKind,
     scopeId: scopeKind === 'global' ? undefined : activeScope(flags, config).id,
     session: typeof flags.session === 'string' ? flags.session : undefined,
+    // 溯源（v15）：记下「从哪句话、哪一轮来的」。将来出问题能翻回原话，
+    // 而不是只能整条删掉。excerpt 由调用方给（host 插件传当轮用户首句）。
+    provenance: {
+      kind: source === 'model' ? 'model' : 'user',
+      at: nowIso(),
+      session: typeof flags.session === 'string' ? flags.session : undefined,
+      turn: Number.isFinite(Number(flags.turn)) ? Number(flags.turn) : undefined,
+      excerpt: typeof flags.excerpt === 'string' ? flags.excerpt.slice(0, 80) : undefined,
+    },
   }
+  assertValid(record, config, flags)
   const clampNote = truncated ? `\n（原文 ${rawFact.length} 字，超过 ${MAX_FACT} 字上限，已截断后记录）` : ''
+  const redactNote = cleaned.hits > 0 ? `\n（已脱敏 ${cleaned.hits} 处敏感内容）` : ''
   if (flags.pending === true) {
     appendJsonl(p('pending.jsonl'), record)
-    process.stdout.write(`已加入待审候选 [${dim}] ${record.fact}${clampNote}\n（确认：profile review --accept ${record.id}；或 review --accept all）\n`)
+    process.stdout.write(`已加入待审候选 [${dim}] ${record.fact}${clampNote}${redactNote}\n（确认：profile review --accept ${record.id}；或 review --accept all）\n`)
     return
   }
   appendJsonl(p('declarations.jsonl'), record)
   rebuildQuietly()
-  process.stdout.write(`已记录 [${dim}] ${record.fact}${clampNote}\n（画像已刷新）\n`)
+  process.stdout.write(`已记录 [${dim}] ${record.fact}${clampNote}${redactNote}\n（画像已刷新）\n`)
 }
 
 function cmdObserve({ flags }) {
@@ -783,6 +980,8 @@ function buildDimensions(declarations, observed, config) {
       core: record.core === true,
       scope: record.scope ?? 'global',
       scopeId: record.scopeId,
+      // 溯源：面板与 show 用它回答「这条是从哪来的」
+      provenance: record.provenance,
       firstSeen: record.at,
       lastSeen: record.at,
       ...extra,
@@ -951,12 +1150,14 @@ function renderMarkdown(profile, config) {
  * 单列并在标题里写明「主要依据」，个性化需求才真的落到这些条目上。
  */
 function renderInject(profile, config) {
+  // maxChars <= 0 表示不设上限：条目数量由「有效性闸门」把住，而不是靠截断。
   const limit = Number.isFinite(config.inject?.maxChars) && config.inject.maxChars > 0
     ? config.inject.maxChars
-    : DEFAULT_CONFIG.inject.maxChars
-  const topK = Number.isFinite(config.inject?.topK) && config.inject.topK > 0
+    : 0
+  // topK 只对「背景参考」段生效；0 = 不限（旧默认 8 会截掉背景段，等于悄悄少给信息）
+  const restK = Number.isFinite(config.inject?.topK) && config.inject.topK > 0
     ? config.inject.topK
-    : DEFAULT_CONFIG.inject.topK
+    : 0
   const prioritize = config.inject?.priorityOnPersonalize !== false
   const personalizeDims = prioritize && Array.isArray(config.inject?.personalizeDimensions)
     ? config.inject.personalizeDimensions
@@ -965,7 +1166,9 @@ function renderInject(profile, config) {
   const all = flatten(profile, config)
   const redline = all.filter((item) => item.core)
   const personalize = all.filter((item) => !item.core && personalizeDims.includes(item.dim))
-  const rest = all.filter((item) => !item.core && !personalizeDims.includes(item.dim)).slice(0, topK)
+  const restAll = all.filter((item) => !item.core && !personalizeDims.includes(item.dim))
+  const rest = restK > 0 ? restAll.slice(0, restK) : restAll
+  const restCutByK = restAll.length - rest.length
 
   const lineOf = (item) => {
     const kind = item.kind === 'declared' ? '已确认' : '我的观察'
@@ -974,21 +1177,28 @@ function renderInject(profile, config) {
     return `- [${item.dimLabel} ${round(item.weight ?? 0, 2)}${frozen}${scope}·${kind}] ${safeText(item.text)}`
   }
 
-  const total = redline.length + personalize.length + rest.length
+  // 「本次带入」按**实际写进正文**的条数算（最后回填），不能把被预算裁掉的也数进去。
   // 这里只放「数据」：版本、时间、条数。使用规则（谁优先、什么时候当主要依据）
   // 是插件内部规定，写在 index.js 的 PLUGIN_POLICY 里，不落进画像文件，
   // 也不随画像被编辑/删除而改变。
   const head = [
     `# 用户画像 v${profile.revision}`,
-    `> 生成于 ${profile.builtAt} · 共 ${profile.stats?.items ?? all.length} 条，本次带入 ${total} 条`,
+    `> 生成于 ${profile.builtAt} · 共 ${profile.stats?.items ?? all.length} 条，本次带入 0 条`,
     '',
   ]
 
   const body = [...head]
   let used = head.join('\n').length
 
-  /** 逐段压预算：red 占 40%，personalize 累计 75%，其余吃满 limit。 */
-  const pushSection = (title, items, cap, noteWhenCut) => {
+  /**
+   * 逐段写正文。
+   *
+   * 旧实现给红线 40%、给个性化 75% —— 结果红线（规定里最优先的那一段）反而先被裁，
+   * 而个性化段不受 topK 约束、可以一路挤到 75%，跟「红线 > 个性化」正好相反。
+   * 现在三段共用一个绝对预算，先写的先占：红线永远优先，个性化次之，背景参考最后。
+   * limit === 0 时不裁任何东西。
+   */
+  const pushSection = (title, items, noteWhenCut) => {
     if (items.length === 0) return
     const header = `${title}`
     body.push(header)
@@ -996,7 +1206,7 @@ function renderInject(profile, config) {
     let cut = 0
     for (const item of items) {
       const line = lineOf(item)
-      if (used + line.length + 1 > cap) {
+      if (limit > 0 && used + line.length + 1 > limit) {
         cut += 1
         continue
       }
@@ -1007,24 +1217,22 @@ function renderInject(profile, config) {
     body.push('')
   }
 
-  pushSection(
-    '## 一、红线与硬要求',
-    redline,
-    Math.floor(limit * 0.4),
-    (cut) => `（红线还有 ${cut} 条没放下：调大 inject.maxChars，或收窄 inject.coreDimensions）`,
-  )
-  pushSection(
-    '## 二、个性化首选',
-    personalize,
-    Math.floor(limit * 0.75),
-    (cut) => `（个性化条目还有 ${cut} 条没放下：调大 inject.maxChars 或 inject.topK）`,
-  )
-  pushSection('## 三、背景参考', rest, limit, (cut) =>
-    `（另有 ${cut} 条按预算裁掉；调 inject.maxChars / inject.topK 可放宽）`)
+  pushSection('## 一、红线与硬要求', redline, (cut) =>
+    `（红线还有 ${cut} 条超出预算没放下：调大 inject.maxChars，或把 inject.maxChars 设为 0）`)
+  pushSection('## 二、个性化首选', personalize, (cut) =>
+    `（个性化条目还有 ${cut} 条超出预算没放下：调大 inject.maxChars，或把 inject.maxChars 设为 0）`)
+  pushSection('## 三、背景参考', rest, (cut) =>
+    `（背景参考还有 ${cut} 条超出预算没放下：调大 inject.maxChars，或把 inject.maxChars 设为 0）`)
 
+  if (restCutByK > 0) {
+    body.push(`（另有 ${restCutByK} 条背景参考被 inject.topK=${restK} 限制在外；设 0 可全部带入）`)
+  }
   if (profile.stats.pending > 0) {
     body.push(`（有 ${profile.stats.pending} 条待审候选未进画像）`)
   }
+  // 回填真实条数：只有真的写进正文的才算「带入」
+  const written = body.filter((line) => line.startsWith('- [')).length
+  body[1] = body[1].replace('本次带入 0 条', `本次带入 ${written} 条`)
   return `${body.join('\n').trimEnd()}\n`
 }
 
@@ -1189,6 +1397,8 @@ function cmdPanel() {
       frozen: item.frozen === true,
       scope: item.scope ?? 'global',
       scopeId: item.scopeId ?? null,
+      // 溯源：面板上要能回答「这条是怎么来的」，所以来源与原话摘录都要透出来
+      provenance: item.provenance ?? null,
       firstSeen: item.firstSeen ?? null,
       lastSeen: item.lastSeen ?? null,
     })),
@@ -1201,6 +1411,7 @@ function cmdPanel() {
       source: r.source ?? 'user',
       confidence: r.confidence ?? 1,
       scope: r.scope ?? 'global',
+      provenance: r.provenance ?? null,
     })),
   }
   // ---- 面板用的统计：只算「用户看得懂的东西」 ----
@@ -1282,6 +1493,17 @@ function cmdPanel() {
       },
       capture: { turnText: config.capture?.turnText !== false },
       redaction: { mode: config.redaction.mode, patternCount: (config.redaction.patterns ?? []).length },
+      // 面板只能看到配置里「要不要传、传到哪」，密码永远不从这里出来。
+      backup: {
+        webdav: {
+          enabled: config.backup?.webdav?.enabled === true,
+          url: config.backup?.webdav?.url ?? '',
+          username: config.backup?.webdav?.username ?? '',
+          passwordEnv: config.backup?.webdav?.passwordEnv ?? 'DSH_PROFILE_WEBDAV_PASSWORD',
+          remoteDir: config.backup?.webdav?.remoteDir ?? 'dsh-user-profile',
+          autoUploadOnBuild: config.backup?.webdav?.autoUploadOnBuild === true,
+        },
+      },
       scope: { id: activeScope({}, config).id },
     },
     stats: {
@@ -1446,7 +1668,10 @@ function cmdEdit({ flags }) {
   if (record === undefined) die(`没有这条声明：${id}`)
 
   const before = { ...record }
-  if (typeof flags.fact === 'string' && flags.fact.trim().length > 0) record.fact = redact(flags.fact.trim(), config)
+  const edited = typeof flags.fact === 'string' && flags.fact.trim().length > 0
+    ? redactWithCount(flags.fact.trim(), config)
+    : { text: record.fact, hits: 0 }
+  if (typeof flags.fact === 'string' && flags.fact.trim().length > 0) record.fact = edited.text
   if (typeof flags.dim === 'string' && flags.dim.length > 0) {
     if (!config.dimensions.includes(flags.dim)) die(`未知维度 ${flags.dim}；可用：${config.dimensions.join(', ')}`)
     record.dim = flags.dim
@@ -1462,11 +1687,14 @@ function cmdEdit({ flags }) {
   record.editedAt = nowIso()
   // 改完要当作「最新」参与冲突裁决，否则同 key 的旧值会继续压住它
   record.at = record.editedAt
+  // 改内容也要过闸门：改坏了照样会污染注入块
+  if (typeof flags.fact === 'string' && flags.fact.trim().length > 0) assertValid(record, config, flags)
 
   writeJsonl(p('declarations.jsonl'), records)
   appendJsonl(p('changelog.jsonl'), { at: record.editedAt, kind: 'edit', id, before, after: { ...record } })
   rebuildQuietly()
-  process.stdout.write(`已修改 ${id}：[${record.dim}] ${record.fact}\n（画像已刷新）\n`)
+  const redactNote = edited.hits > 0 ? `（已脱敏 ${edited.hits} 处敏感内容）` : ''
+  process.stdout.write(`已修改 ${id}：[${record.dim}] ${record.fact}${redactNote}\n（画像已刷新）\n`)
 }
 
 /**
@@ -1531,6 +1759,8 @@ function cmdImport({ flags }) {
 
   let added = 0
   let skipped = 0
+  let invalid = 0
+  const reasons = new Map()
   for (const row of rows) {
     const fact = typeof row?.fact === 'string' ? row.fact.trim() : ''
     const rawDim = typeof row?.dim === 'string' ? row.dim : 'taste'
@@ -1548,23 +1778,36 @@ function cmdImport({ flags }) {
     const confidence = Number.isFinite(Number(row?.confidence))
       ? Math.min(1, Math.max(0, Number(row.confidence)))
       : (source === 'user' ? 1 : 0.6)
+    const cleaned = redactWithCount(fact, config)
     const record = {
       id: newId('dcl'),
       at: nowIso(),
       dim,
-      key: typeof row?.key === 'string' && row.key.length > 0 ? row.key : dim,
-      fact: redact(fact, config),
+      // 默认 key 用「维度 + 内容指纹」：早前用维度名当 key，同一维度导第二条就顶掉第一条
+      key: typeof row?.key === 'string' && row.key.length > 0 ? row.key : `${dim}.${factKey(fact)}`,
+      fact: cleaned.text,
       source,
       confidence,
       core: row?.core === true,
       scope: 'global',
       importedFrom: file,
+      provenance: row?.provenance ?? { kind: 'import', at: nowIso(), excerpt: undefined },
+    }
+    // 导入是最容易把脏数据带进来的入口：逐条过闸门，不合适就归纳原因、不落库。
+    const verdict = validateEntry(record, config)
+    if (!verdict.ok) {
+      invalid += 1
+      for (const reason of verdict.reasons) reasons.set(reason, (reasons.get(reason) ?? 0) + 1)
+      continue
     }
     appendJsonl(flags.pending === true ? p('pending.jsonl') : p('declarations.jsonl'), record)
     added += 1
   }
   rebuildQuietly()
-  process.stdout.write(`导入 ${added} 条，跳过 ${skipped} 条（空内容或未知维度）；画像已刷新\n`)
+  process.stdout.write(`导入 ${added} 条，跳过 ${skipped} 条（空内容或未知维度），不合格 ${invalid} 条；画像已刷新\n`)
+  if (invalid > 0) {
+    for (const [reason, count] of reasons) process.stdout.write(`  不合格原因 ×${count}：${reason}\n`)
+  }
 }
 
 /** 自定义维度：id 用英文小写，标签随便写中文。 */
@@ -1754,8 +1997,8 @@ function cmdStatus({ flags }) {
 const SET_SPEC = {
   enabled: { type: 'boolean', note: '默认叠加总开关' },
   'inject.mode': { type: 'enum', values: ['always', 'on-request'], note: 'always=每次任务都叠加；on-request=只在被要求时' },
-  'inject.maxChars': { type: 'number', min: 200, max: 8000, integer: true, note: '注入正文预算（字符）' },
-  'inject.topK': { type: 'number', min: 1, max: 50, integer: true, note: '非核心条目最多带几条' },
+  'inject.maxChars': { type: 'number', min: 0, max: 200000, integer: true, note: '注入正文预算（字符）；0 = 不设上限' },
+  'inject.topK': { type: 'number', min: 0, max: 500, integer: true, note: '背景参考段最多带几条；0 = 不限' },
   'inject.coreDimensions': { type: 'dimensionList', note: '这些大类的条目必进注入块' },
   'inject.personalizeDimensions': { type: 'dimensionList', note: '个性化需求时的主要依据' },
   'inject.priorityOnPersonalize': { type: 'boolean', note: '个性化轮是否以画像为主要依据' },
@@ -1787,7 +2030,15 @@ const SET_SPEC = {
   'capture.toolNames': { type: 'boolean', note: '是否记工具名' },
   'capture.userText': { type: 'boolean', note: '是否把对话正文落盘（永远不建议开）' },
   'capture.turnText': { type: 'boolean', note: '是否允许模型读取轮内正文（只在内存里）' },
-  'redaction.mode': { type: 'enum', values: ['unknown', 'off', 'patterns'], note: '脱敏模式' },
+  'redaction.mode': { type: 'enum', values: ['unknown', 'off', 'preset', 'patterns'], note: '脱敏模式' },
+  'redaction.presets': { type: 'list', values: ['phone', 'email', 'idcard', 'secret'], note: '启用的脱敏预设' },
+  'backup.webdav.enabled': { type: 'boolean', note: '是否启用 WebDAV 备份' },
+  'backup.webdav.url': { type: 'string', note: 'WebDAV 根地址，如 https://dav.example.com/remote.php/dav/files/me' },
+  'backup.webdav.username': { type: 'string', note: 'WebDAV 用户名' },
+  'backup.webdav.remoteDir': { type: 'string', note: '远端目录名' },
+  'backup.webdav.passwordEnv': { type: 'string', note: '存密码的环境变量名（默认 DSH_PROFILE_WEBDAV_PASSWORD）' },
+  'backup.webdav.autoUploadOnBuild': { type: 'boolean', note: '每次重建画像后自动上传' },
+  'backup.webdav.timeoutMs': { type: 'number', min: 1000, max: 600000, integer: true, note: '上传超时（毫秒）' },
   'scope.id': { type: 'string', note: '项目作用域标识（空=用当前目录名）' },
 }
 
@@ -1831,6 +2082,24 @@ function coerceSetting(dotted, rawValue, config) {
     const unknown = list.filter((dim) => !config.dimensions.includes(dim))
     if (unknown.length > 0) die(`${dotted} 里有不存在的大类：${unknown.join(', ')}`)
     return list
+  }
+  if (spec.type === 'list') {
+    const text = String(rawValue).trim()
+    if (text.length === 0) return []
+    if (text.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(text)
+        if (Array.isArray(parsed)) return parsed.map((item) => String(item).trim()).filter(Boolean)
+      } catch {
+        // 不是合法 JSON 就按逗号/空格切
+      }
+    }
+    const items = text.split(/[,\s]+/).filter(Boolean)
+    if (Array.isArray(spec.values)) {
+      const unknown = items.filter((item) => !spec.values.includes(item))
+      if (unknown.length > 0) die(`${dotted} 里有不认识的值：${unknown.join(', ')}（可选 ${spec.values.join(' / ')}）`)
+    }
+    return items
   }
   if (spec.type === 'string') return String(rawValue)
   die(`配置项 ${dotted} 的类型未定义，先在 SET_SPEC 里补上`)
@@ -1893,6 +2162,236 @@ function cmdExport({ flags }) {
 
 // ---------------------------------------------------------------- 入口
 
+/**
+ * 体检：逐条过有效性闸门。
+ * 默认只报告；`--quarantine` 会把不合格的条目移出仓库、存成 invalid-<时间戳>.jsonl，
+ * 再重建画像 —— 也就是说，脏数据要么被修好，要么被拎出来，不会留在里面继续误导注入。
+ */
+function cmdValidate({ flags }) {
+  const config = loadConfig()
+  const file = flags.pending === true ? p('pending.jsonl') : p('declarations.jsonl')
+  const records = readJsonl(file)
+  const bad = []
+  for (const record of records) {
+    const verdict = validateEntry(record, config)
+    if (!verdict.ok) bad.push({ record, reasons: verdict.reasons })
+  }
+  process.stdout.write(`检查 ${records.length} 条，不合格 ${bad.length} 条\n`)
+  for (const { record, reasons } of bad.slice(0, 20)) {
+    process.stdout.write(`- ${record.id} [${record.dim}] ${String(record.fact ?? '').slice(0, 40)}\n    ${reasons.join('；')}\n`)
+  }
+  if (bad.length > 20) process.stdout.write(`（还有 ${bad.length - 20} 条未列出）\n`)
+  if (bad.length === 0) return
+  if (flags.quarantine !== true) {
+    process.stdout.write('（加 --quarantine 可把这些条目移到隔离文件，并从画像中移除）\n')
+    return
+  }
+  const stamp = nowIso().replace(/[:.]/g, '-')
+  const dump = p(`invalid-${stamp}.jsonl`)
+  const badIds = new Set(bad.map((entry) => entry.record.id))
+  writeJsonl(dump, bad.map((entry) => ({ ...entry.record, invalidReasons: entry.reasons })))
+  snapshotDeclarations('validate')
+  writeJsonl(file, records.filter((record) => !badIds.has(record.id)))
+  appendJsonl(p('changelog.jsonl'), { at: nowIso(), kind: 'quarantine', count: bad.length, file: basename(dump) })
+  rebuildQuietly()
+  process.stdout.write(`已隔离 ${bad.length} 条到 ${basename(dump)}（画像已刷新）\n`)
+}
+
+/** 批量清洗已有记录里的敏感值：默认只预览，`--apply` 才写回（写前留快照）。 */
+function cmdRedact({ flags }) {
+  const config = loadConfig()
+  const file = p('declarations.jsonl')
+  const records = readJsonl(file)
+  let changed = 0
+  let hits = 0
+  const next = records.map((record) => {
+    const fact = typeof record.fact === 'string' ? record.fact : ''
+    const result = redactWithCount(fact, config)
+    if (result.text === fact) return record
+    changed += 1
+    hits += result.hits
+    return { ...record, fact: result.text, redactedAt: nowIso(), redactedFrom: fact.slice(0, 120) }
+  })
+  process.stdout.write(`扫描 ${records.length} 条：${changed} 条含敏感内容，共 ${hits} 处\n`)
+  if (changed === 0) return
+  if (flags.apply !== true) {
+    process.stdout.write('（加 --apply 写回；写前会自动留一份快照）\n')
+    return
+  }
+  snapshotDeclarations('redact')
+  writeJsonl(file, next)
+  appendJsonl(p('changelog.jsonl'), { at: nowIso(), kind: 'redact', changed, hits })
+  rebuildQuietly()
+  process.stdout.write(`已脱敏 ${changed} 条（${hits} 处）；画像已刷新\n`)
+}
+
+// ---------------------------------------------------------------- 备份（WebDAV）
+
+/**
+ * WebDAV 备份。
+ *
+ * 三条硬规矩：
+ *   1) 密码不进 config.json —— 只从环境变量或 secrets.json 读；配置文件会被导出、会被
+ *      放进仓库，密码放进去等于公开。
+ *   2) 默认关闭 —— 往远端写数据必须是用户主动开的。
+ *   3) 只传「导出包」：config（已剥掉密码字段）+ declarations + pending + profile。
+ *      对话正文从来没落盘，所以这里也不可能有。
+ */
+function webdavSettings(config) {
+  const dav = { ...DEFAULT_CONFIG.backup.webdav, ...(config?.backup?.webdav ?? {}) }
+  return {
+    ...dav,
+    base: String(dav.url ?? '').replace(/\/+$/, ''),
+    dir: String(dav.remoteDir ?? '').replace(/^\/+|\/+$/g, ''),
+  }
+}
+
+function webdavPassword(dav) {
+  if (dav.passwordEnv && typeof process.env[dav.passwordEnv] === 'string' && process.env[dav.passwordEnv].length > 0) {
+    return process.env[dav.passwordEnv]
+  }
+  const secrets = readJson(p('secrets.json'), {})
+  return typeof secrets?.webdavPassword === 'string' ? secrets.webdavPassword : ''
+}
+
+function webdavAuth(dav) {
+  const password = webdavPassword(dav)
+  if (password.length === 0) {
+    die(`缺少 WebDAV 密码：设置环境变量 ${dav.passwordEnv}，或把 {"webdavPassword":"…"} 写进 ${p('secrets.json')}（建议限制为本人可读）`)
+  }
+  return `Basic ${Buffer.from(`${dav.username}:${password}`).toString('base64')}`
+}
+
+async function davFetch(dav, url, init = {}) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), dav.timeoutMs)
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+      headers: { Authorization: webdavAuth(dav), ...(init.headers ?? {}) },
+    })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+const davDirUrl = (dav) => `${dav.base}/${encodeURI(dav.dir)}`
+const davFileUrl = (dav, name) => `${davDirUrl(dav)}/${encodeURI(name)}`
+
+/** 备份内容：一个自洽的 JSON 包，能直接 `profile import --file` 回灌。 */
+function backupPayload(config) {
+  const declarations = readJsonl(p('declarations.jsonl'))
+  const pending = readJsonl(p('pending.jsonl'))
+  const profile = readJson(p('profile.json'), null)
+  const safeConfig = JSON.parse(JSON.stringify(config))
+  if (safeConfig?.backup?.webdav) {
+    // 不把 URL 之外的连接信息带走：备份包可能被放到别处
+    safeConfig.backup.webdav = { ...safeConfig.backup.webdav, username: '', passwordEnv: 'DSH_PROFILE_WEBDAV_PASSWORD', url: '' }
+  }
+  return {
+    kind: 'dsh-user-profile-backup',
+    schemaVersion: DEFAULT_CONFIG.schemaVersion,
+    exportedAt: nowIso(),
+    host: process.env.COMPUTERNAME || process.env.HOSTNAME || 'local',
+    config: safeConfig,
+    declarations,
+    pending,
+    profile,
+  }
+}
+
+async function davEnsureDir(dav) {
+  // 已存在时 MKCOL 返回 405；不存在则 201。两者都算正常。
+  const response = await davFetch(dav, davDirUrl(dav), { method: 'MKCOL' })
+  if (response.status >= 400 && response.status !== 405) {
+    // 上级目录也可能不存在：再试一次 MKCOL 建一层父目录
+    const parent = davDirUrl(dav).replace(/\/[^/]+$/, '')
+    if (parent !== dav.base) await davFetch(dav, parent, { method: 'MKCOL' })
+    const retry = await davFetch(dav, davDirUrl(dav), { method: 'MKCOL' })
+    if (retry.status >= 400 && retry.status !== 405) {
+      die(`建不了远端目录 ${davDirUrl(dav)}（HTTP ${retry.status}）；检查 URL 与账号权限`)
+    }
+  }
+}
+
+async function davUpload(dav, name, text) {
+  await davEnsureDir(dav)
+  const response = await davFetch(dav, davFileUrl(dav, name), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    body: text,
+  })
+  if (!response.ok) die(`上传失败：HTTP ${response.status} ${response.statusText}`)
+  return name
+}
+
+async function davList(dav) {
+  const response = await davFetch(dav, davDirUrl(dav), {
+    method: 'PROPFIND',
+    headers: { Depth: '1', 'Content-Type': 'application/xml' },
+    body: '<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:getcontentlength/><d:getlastmodified/></d:prop></d:propfind>',
+  })
+  if (response.status === 404) return []
+  if (!response.ok) die(`列目录失败：HTTP ${response.status}`)
+  const xml = await response.text()
+  const names = [...xml.matchAll(/<d:href>([^<]+)<\/d:href>/g)].map((m) => decodeURI(m[1]))
+  return names
+    .map((href) => href.split('/').filter(Boolean).pop() ?? '')
+    .filter((name) => name.endsWith('.json'))
+}
+
+async function cmdBackup({ flags }) {
+  const config = loadConfig()
+  const dav = webdavSettings(config)
+
+  // 只做本地导出：不配 WebDAV 也能拿走一份可回灌的包
+  if (typeof flags.out === 'string') {
+    const payload = backupPayload(config)
+    const target = flags.out.endsWith('.json')
+      ? flags.out
+      : join(flags.out, `user-profile-${nowIso().replace(/[:.]/g, '-')}.json`)
+    mkdirSync(flags.out.endsWith('.json') ? join(flags.out, '..') : flags.out, { recursive: true })
+    writeFileSync(target, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
+    process.stdout.write(`已导出到 ${target}\n  ${payload.declarations.length} 条声明 · 待审 ${payload.pending.length} 条\n`)
+    return
+  }
+
+  if (dav.base.length === 0) {
+    die('还没配 WebDAV：先 `profile set backup.webdav.url https://dav.example.com/remote.php/dav/files/me`（再设 username/passwordEnv），或用 `backup --out <目录>` 只做本地导出')
+  }
+
+  if (flags.list === true) {
+    const names = await davList(dav)
+    process.stdout.write(names.length === 0 ? '远端还没有备份\n' : `${names.map((n) => `  ${n}`).join('\n')}\n`)
+    return
+  }
+
+  if (typeof flags.pull === 'string') {
+    const out = typeof flags.out === 'string' ? flags.out : p(`pulled-${flags.pull}`)
+    const response = await davFetch(dav, davFileUrl(dav, flags.pull))
+    if (!response.ok) die(`下载失败：HTTP ${response.status}`)
+    const text = await response.text()
+    writeFileSync(out, text, 'utf8')
+    process.stdout.write(`已下载到 ${out}\n（用 profile import --file "${out}" 回灌）\n`)
+    return
+  }
+
+  const payload = backupPayload(config)
+  const text = `${JSON.stringify(payload, null, 2)}\n`
+  const stamp = nowIso().replace(/[:.]/g, '-')
+  const host = String(payload.host).replace(/[^\w.-]/g, '_')
+  const name = `user-profile-${host}-${stamp}.json`
+
+  if (flags['dry-run'] === true) {
+    process.stdout.write(`会备份到 ${davFileUrl(dav, name)}\n  声明 ${payload.declarations.length} 条 · 待审 ${payload.pending.length} 条 · ${Buffer.byteLength(text)} 字节\n`)
+    return
+  }
+  const uploaded = await davUpload(dav, name, text)
+  appendJsonl(p('changelog.jsonl'), { at: nowIso(), kind: 'backup-webdav', file: uploaded, bytes: Buffer.byteLength(text) })
+  process.stdout.write(`已备份到 ${davFileUrl(dav, uploaded)}\n  ${payload.declarations.length} 条声明 · ${Buffer.byteLength(text)} 字节\n`)
+}
+
 const COMMANDS = {
   init: cmdInit,
   declare: cmdDeclare,
@@ -1912,13 +2411,16 @@ const COMMANDS = {
   set: cmdSet,
   reset: cmdReset,
   export: cmdExport,
+  validate: cmdValidate,
+  redact: cmdRedact,
+  backup: cmdBackup,
 }
 
 // 改写型命令必须串行：它们都是「读全量 → 改几条 → 整表写回」，
 // 并发时后写的一方会把前一方刚加的记录覆盖掉（这正是丢记录的元凶）。
 // 追加型命令（declare/observe）也一并加锁：否则它可能恰好插在别人「读」和「写回」之间，
 // 追加的那条会被整表写回抹掉——这正是实测丢 3 条声明的现场。
-const MUTATING = new Set(['declare', 'observe', 'build', 'review', 'forget', 'edit', 'merge', 'import', 'dims', 'set', 'reset', 'restore'])
+const MUTATING = new Set(['declare', 'observe', 'build', 'review', 'forget', 'edit', 'merge', 'import', 'dims', 'set', 'reset', 'restore', 'validate', 'redact'])
 
 function main() {
   const { positional, flags } = parseArgs(process.argv.slice(2))
@@ -1929,11 +2431,14 @@ function main() {
   }
   const handler = COMMANDS[command]
   if (handler === undefined) die(`未知命令 ${command}`)
-  if (MUTATING.has(command)) {
-    withLock(() => handler({ positional, flags }))
-    return
+  // 有的命令（backup 上传备份）是 async 的：withLock 只保证「同步段」互斥，
+  // 所以网络类命令不进 MUTATING，这里统一兜住返回的 Promise。
+  const outcome = MUTATING.has(command)
+    ? withLock(() => handler({ positional, flags }))
+    : handler({ positional, flags })
+  if (outcome !== undefined && typeof outcome.then === 'function') {
+    outcome.catch((error) => die(`命令失败：${error?.message ?? error}`))
   }
-  handler({ positional, flags })
 }
 
 main()

@@ -5,6 +5,28 @@ The portrait schema version is tracked separately and lives in `config.json`.
 
 ## Unreleased
 
+### v15 — quality gates instead of size caps
+
+### Added
+- **MCP server** (`mcp/server.mjs`): stdio JSON-RPC 2.0, zero dependencies, 10 tools (`profile_get/status/search/declare/forget/set_weight/review/validate/backup/set`) and 2 resources (`user-profile://portrait`, `user-profile://declarations`). Thin wrappers over the CLI, so MCP and CLI can never diverge. stdout carries protocol only; logs go to stderr.
+- **Redaction presets** applied *before* writing: phone, email, national ID, secrets (`sk-`/`ghp_`/`github_pat_`/`AKIA`/`xox?-`). Hits are reported in the receipt; stored text never contains the raw value.
+- **`profile redact`**: scan-only by default (`N entries, M hits`), `--apply` rewrites after taking a snapshot.
+- **Provenance** on every declared entry: `{kind, at, session, turn, excerpt}`; surfaced in `profile show`, `panel` (`items[].provenance`, `pending[].provenance`) and the panel's item subline.
+- **`profile validate`**: reports entries that fail the validity gate; `--quarantine` moves them to `invalid-<ts>.jsonl` (snapshot first).
+- **WebDAV backup**: `backup` uploads, `--list`, `--pull <name>`, `--dry-run`, `--out <dir|file>` (local, no network). Password read from `DSH_PROFILE_WEBDAV_PASSWORD` or `secrets.json` — never written to config or into the backup bundle.
+- Panel: “体检 · 脱敏 · 云端备份” section, a yellow data-warning banner, and a “云端备份（WebDAV）” settings group.
+
+### Changed
+- **No size caps by default**: `inject.maxChars=0` and `inject.topK=0` (0 = unlimited). Volume is controlled by the gate, not by truncation.
+- **Injection budget is a single absolute pool, first-write-first-served** (constraints → personalisation → background). The old per-section percentage caps are gone — they let hard constraints be cut before background notes.
+- **Default entry key** is `${dim}.${factKey(fact)}` (djb2 fingerprint) instead of the dimension name, so a second entry in the same dimension no longer overwrites the first.
+
+### Fixed
+- **Silent data loss in `readJsonl`.** Malformed lines were skipped without a word. They are now quarantined to `<file>.bad-<date>`, the good lines are rewritten atomically, and the incident is reported via `warnings` (panel banner + `status`).
+- **Busy-wait lock.** `withLock` spun on `Date.now()` (up to 10 s of full CPU). It now sleeps via `Atomics.wait`.
+- **Lock could be stolen from a live holder.** The timestamp was written in a second step (`openSync` → `writeFileSync`), so a concurrent process could read an empty file, treat it as a 60 s-old stale lock and delete it — two writers, one lock, lost entries. The stamp is now written through the same descriptor that creates the file, and an unreadable stamp is treated as “just created”, never as stale.
+- **Project-scoped entries were rejected by the global gate.** The “this looks like a one-off task detail” rule now only applies to `scope=global`.
+
 ### Fixed
 - **Config corruption was silent.** A malformed `config.json` used to be swallowed and replaced by defaults in memory, then overwritten on the next write — the user's settings disappeared without a word. Now the file is backed up to `config.json.corrupt-<ts>`, rebuilt from defaults, and the fact is reported by `profile status` and in the panel's `warnings`.
 - **Portrait text could forge structure.** An entry containing `## heading`, a newline, or `<!--dsh-user-profile-->` could invent a new injection section or trip the "already injected" fingerprint. Rendering now sanitises every entry (`safeText`) while the stored text stays untouched.

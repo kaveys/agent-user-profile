@@ -119,9 +119,53 @@ $CLI show                                    # 画像全文；--inject 看注入
 $CLI panel                                   # 设置页用的扁平 JSON（条目按权重降序）
 $CLI status                                  # 数据量 / 版本 / topK / 待审数 / 注入字符数
 $CLI forget --id dcl_xxx                      # 删掉某条声明
+$CLI validate                                # 体检：哪些条目「不合格」（只报告，不改数据）；--quarantine 才隔离
+$CLI redact                                  # 扫描敏感信息；--apply 才写回（写回前留快照）
+$CLI backup --out ~/backup                   # 本地导出整包；backup --list / --pull / --dry-run
 $CLI set enabled false                       # 关掉默认叠加
 $CLI reset --yes                             # 归档清空
 ```
+
+## 条目凭什么算「有效」（v15）
+
+条数不设上限（`inject.maxChars=0`、`inject.topK=0` 默认就是不限），体积靠**准入闸门**控制，而不是靠事后截断：
+
+| 闸门 | 拒绝的情况 |
+| --- | --- |
+| 形状 | 短于 3 字 / 长于 400 字 / 含换行 / 含 `#` 标题、`<!-- -->`、`【插件规定】` 等能伪造注入结构的字符 |
+| 归属 | 维度已被删掉、`key` 为空、置信度不在 0..1 |
+| 时效 | 读起来是「本次 / 这一轮 / 临时 / 这个文件」这类一次性细节（`--scope project` 的条目不套用这条，因为它本来就只在项目内有效） |
+| 逃生阀 | `--force` 可强行写入，但会在 stderr 说清违反了哪几条 |
+
+`profile validate` 可以随时体检；`--quarantine` 会把不合格条目移到 `invalid-<时间戳>.jsonl`（移之前自动留快照）。
+
+## 脱敏与溯源（v15）
+
+- **写入前**脱敏：手机号 / 邮箱 / 证件号 / 密钥四类预设，命中即换成 `⟨手机号⟩` 这类占位符，回执写「已脱敏 N 处」。
+- 历史条目用 `profile redact` 先扫描（只报告），确认后 `--apply` 写回。
+- 每条带 `provenance`：来源（用户 / 模型）、时间、会话、轮次、原话前 80 字。面板条目副行会显示「你亲口说的 / 模型提炼」，悬停看原话。
+
+## 默认不设上限，但也不失控
+
+`build` 预渲染 `inject.md`，三段顺序写死：**红线与硬要求 → 个性化首选 → 背景参考**，共用一个绝对预算、先写先得。
+没有分段百分比帽（旧版给红线 40%、个性化 75%，结果是红线先被裁）。设 `inject.maxChars` 为正数才按优先级截断，并在末尾说明「另有 N 条被 topK 限制在外；设 0 可全部带入」。
+
+## MCP：让别的宿主也用同一份画像（v15）
+
+```json
+{ "mcpServers": { "user-profile": {
+  "command": "node",
+  "args": ["<安装目录>/dsh-user-profile/mcp/server.mjs"]
+} } }
+```
+
+十个工具：`profile_get` / `profile_status` / `profile_search` / `profile_declare` / `profile_forget` / `profile_set_weight` / `profile_review` / `profile_validate` / `profile_backup` / `profile_set`；两个资源：`user-profile://portrait`、`user-profile://declarations`。
+stdio + 行分隔 JSON-RPC 2.0，**stdout 只走协议、日志全走 stderr**。每个工具都是「参数 → 调 CLI → 回文本」的薄封装，所以不存在 MCP 版与 CLI 版行为不一致。
+
+## WebDAV 备份（v15）
+
+在设置页「云端备份」或 `config.json` 里配 `backup.webdav.{url,username,remoteDir}`；密码放环境变量 `DSH_PROFILE_WEBDAV_PASSWORD`（也可写 `secrets.json`），**不写进配置文件**。
+`profile backup` 上传 / `--list` 列远端 / `--pull <名字>` 下载 / `--dry-run` 只算体积 / `--out <目录>` 本地导出。备份包含条目、待审、设置快照（其中的账号与地址会被清空），可直接导回。
 
 ## 默认叠加与例外
 
@@ -135,10 +179,9 @@ $CLI reset --yes                             # 归档清空
 
 抑制短语在 `~/.dsh/user-profile/config.json` 的 `suppressPatterns`，可自行增删。
 
-### 注入是两段式的（v2）
+### 注入是三段式、单一预算（v15）
 
-`build` 预渲染 `inject.md`：**核心条目**（`constraints`、`identity` 两个维度，或声明时 `--core`）必进，最多占预算 70%；其余条目按 `权重 → 最近出现` 排序取前 `inject.topK` 条填满剩余预算。
-这样条目涨到几百条时，红线类事实不会因为 `maxChars` 硬截断被砍掉。
+见上文「默认不设上限，但也不失控」：红线 → 个性化首选 → 背景参考，共用一个绝对预算、先写先得；`maxChars=0` / `topK=0` 表示不截断。旧版（v2）的分段百分比帽已删除，因为它会让红线先被裁。
 
 ### 冲突与待审（v2）
 

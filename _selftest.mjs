@@ -269,7 +269,7 @@ const legacy = JSON.parse(readFileSync(cfgPath, 'utf8'))
 writeFileSync(cfgPath, JSON.stringify({ ...legacy, schemaVersion: 1, build: undefined, conflicts: undefined, scope: undefined }))
 run('status', '--json')   // 任意命令都会走 loadConfig → 迁移
 const migrated = JSON.parse(readFileSync(cfgPath, 'utf8'))
-check('config 迁移到 schemaVersion 4', migrated.schemaVersion === 4, String(migrated.schemaVersion))
+check('config 迁移到 schemaVersion 5', migrated.schemaVersion === 5, String(migrated.schemaVersion))
 check('迁移补出 conflicts/scope/autoBuild', migrated.conflicts?.strategy === 'newest' && migrated.scope !== undefined && migrated.build?.autoBuild === true)
 check('迁移留备份文件', readdirSync(HOME).some((f) => f.startsWith('config.json.bak-v1-')))
 

@@ -3,7 +3,7 @@
 //   A 段 = 隔离数据目录跑全部 CLI 子命令（不碰真实画像）
 //   B 段 = 打真实运行中的面板路由（GET 面板 + POST 12 个动作 + 错误分支），结束时清掉测试痕迹
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync, readdirSync } from 'node:fs'
+import { appendFileSync, mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync, readdirSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -54,7 +54,7 @@ t('init 建出配置与目录', () => {
   for (const f of ['config.json', 'declarations.jsonl', 'pending.jsonl', 'changelog.jsonl']) {
     ok(existsSync(join(box, f)), `缺少 ${f}`)
   }
-  eq(JSON.parse(readFileSync(join(box, 'config.json'), 'utf8')).schemaVersion, 4, 'schemaVersion')
+  eq(JSON.parse(readFileSync(join(box, 'config.json'), 'utf8')).schemaVersion, 5, 'schemaVersion')
 })
 
 t('declare 写入一条声明并自带重建', () => {
@@ -225,6 +225,83 @@ t('export 导出到指定目录', () => {
   const out = join(box, 'exp')
   cliOk(['export', '--out', out])
   ok(existsSync(join(out, 'profile.json')) || readdirSync(out).length > 0, '导出目录为空')
+})
+
+// ---- v15：有效性闸门 / 脱敏 / 溯源 / 备份 / MCP ----
+
+t('validate 只报告不改数据', () => {
+  const before = readJsonl('declarations.jsonl').length
+  cliOk(['declare', '--dim', 'taste', '--fact', '用户偏好结论先行，再给证据', '--confidence', '0.9'])
+  const r = cliOk(['validate'])
+  ok(r.out.includes('不合格 0 条'), `回执：${r.out.trim().slice(0, 120)}`)
+  ok(readJsonl('declarations.jsonl').length === before + 1, 'validate 不该改数据')
+})
+
+t('本次任务细节被有效性闸门拒绝', () => {
+  const r = cli(['declare', '--dim', 'taste', '--fact', '本次任务要改 client.js 的按钮'])
+  ok(r.code !== 0, '应非零退出')
+  ok(/本次任务的细节|不合格/.test(r.out), `文案：${r.out.trim().slice(0, 120)}`)
+})
+
+t('declare 落盘前自动脱敏并记溯源', () => {
+  cliOk(['declare', '--dim', 'identity', '--fact', '用户电话 13800138000，邮箱 me@example.com', '--excerpt', '我电话是 13800138000'])
+  const record = readJsonl('declarations.jsonl').find((row) => (row.fact ?? '').includes('⟨手机号⟩'))
+  ok(record !== undefined, '没找到脱敏后的记录')
+  ok(!record.fact.includes('13800138000'), '手机号没被替换')
+  ok(record.provenance?.excerpt === '我电话是 13800138000', '溯源摘录丢了')
+  const panel = JSON.parse(cliOk(['panel']).stdout)
+  ok(panel.items.some((item) => item.provenance?.excerpt === '我电话是 13800138000'), 'panel 未透出 provenance')
+})
+
+t('redact 默认只统计，--apply 才写回', () => {
+  appendFileSync(
+    join(box, 'declarations.jsonl'),
+    `${JSON.stringify({ id: 'dcl_manual_leak', at: new Date().toISOString(), dim: 'identity', key: 'identity.leak', fact: '用户备用手机 13900139000', source: 'user', confidence: 0.5 })}\n`,
+  )
+  const scan = cliOk(['redact'])
+  ok(/1 条/.test(scan.out), `扫描回执：${scan.out.trim().slice(0, 120)}`)
+  ok(readJsonl('declarations.jsonl').some((row) => row.id === 'dcl_manual_leak' && row.fact.includes('13900139000')), '扫描不该改数据')
+  cliOk(['redact', '--apply'])
+  const after = readJsonl('declarations.jsonl').find((row) => row.id === 'dcl_manual_leak')
+  ok(after === undefined || !after.fact.includes('13900139000'), '--apply 后仍残留手机号')
+})
+
+t('backup --out 导出可回灌的备份包', () => {
+  const dir = join(box, 'backup')
+  cliOk(['backup', '--out', dir])
+  const files = readdirSync(dir).filter((name) => name.endsWith('.json'))
+  ok(files.length > 0, '备份包未生成')
+  const bundle = JSON.parse(readFileSync(join(dir, files[0]), 'utf8'))
+  ok(bundle.kind === 'dsh-user-profile-backup', '备份包 kind 不对')
+  ok(Array.isArray(bundle.declarations) && bundle.declarations.length > 0, '备份包没带条目')
+  ok(bundle.config?.backup?.webdav?.passwordEnv !== undefined, '备份包缺配置快照')
+})
+
+t('未配 WebDAV 时 backup 明确报错而不是假装成功', () => {
+  const r = cli(['backup', '--dry-run'])
+  ok(r.code !== 0, '应非零退出')
+  ok(/WebDAV|backup.webdav/.test(r.out), `文案：${r.out.trim().slice(0, 140)}`)
+})
+
+t('MCP server 能被宿主握手并调用工具', () => {
+  const lines = [
+    JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05' } }),
+    JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+    JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
+    JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'profile_search', arguments: { query: '结论先行' } } }),
+    JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'resources/read', params: { uri: 'user-profile://portrait' } }),
+  ].join('\n')
+  const run = spawnSync(NODE, [join(HERE, 'mcp', 'server.mjs')], { encoding: 'utf8', env, input: `${lines}\n` })
+  ok(run.status === 0, `退出码 ${run.status}`)
+  const replies = run.stdout
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line))
+  ok(replies.length === 4, `应只有 4 条回包（通知不该回）：${replies.length}`)
+  ok(replies[0].result.serverInfo.name === 'agent-user-profile', 'serverInfo')
+  ok(replies[1].result.tools.length >= 10, `工具数 ${replies[1].result.tools.length}`)
+  ok(replies[2].result.content[0].text.includes('结论先行'), 'search 未命中')
+  ok(replies[3].result.contents[0].text.includes('# 用户画像'), '资源未返回画像')
 })
 
 t('reset 归档并清空', () => {

@@ -389,6 +389,20 @@ window.__ModuleLoader__.load({
       return '低'
     }
 
+    /** 溯源的显示形态：一条画像从哪来，用户要能一眼看到而不只是信我们。 */
+    function provenanceNote(item) {
+      const prov = item?.provenance
+      if (prov === null || prov === undefined) return ''
+      const who = prov.kind === 'model' ? '模型提炼' : '你亲口说的'
+      const when = typeof prov.at === 'string' && prov.at.length > 0 ? ` ${relTime(prov.at)}` : ''
+      return ` · ${who}${when}`
+    }
+
+    function excerptOf(item) {
+      const snippet = item?.provenance?.excerpt
+      return typeof snippet === 'string' && snippet.length > 0 ? `原话：${snippet}` : undefined
+    }
+
     function relTime(value) {
       if (typeof value !== 'string' || value.length === 0) return '—'
       const then = Date.parse(value)
@@ -627,11 +641,11 @@ window.__ModuleLoader__.load({
                   h('span', { style: { fontSize: '12px', color: T.label2 } }, item.dimLabel ?? item.dim),
                   item.scope !== undefined && item.scope !== 'global' ? h(Badge, { text: `作用域 ${item.scopeId ?? item.scope}` }) : null),
                 h('td', { style: styles.td },
-                  h('span', null, item.text),
+                  h('span', { title: excerptOf(item) }, item.text),
                   item.core ? h(Badge, { text: '核心', tone: 'core' }) : null,
                   item.frozen ? h(Badge, { text: '未决·冻结', tone: 'warn' }) : null,
                   item.kind === 'declared' ? h(Badge, { text: '已确认' }) : h(Badge, { text: '我的观察' }),
-                  h('div', { style: styles.mono }, `更新于 ${relTime(item.lastSeen)}`)),
+                  h('div', { style: styles.mono }, `更新于 ${relTime(item.lastSeen)}${provenanceNote(item)}`)),
                 h('td', { style: styles.tdRight },
                   h('div', { style: styles.weightRow },
                     h('button', {
@@ -694,8 +708,8 @@ window.__ModuleLoader__.load({
           h('tbody', null, pending.map((row) => h('tr', { key: row.id },
             h('td', { style: styles.td }, row.dim),
             h('td', { style: styles.td },
-              h('span', null, row.fact),
-              h('div', { style: styles.mono }, `${row.source === 'model' ? '模型提炼' : '手动记录'} · ${relTime(row.at)} · ${row.id}`)),
+              h('span', { title: excerptOf(row) }, row.fact),
+              h('div', { style: styles.mono }, `${row.source === 'model' ? '模型提炼' : '手动记录'} · ${relTime(row.at)}${provenanceNote(row)}`)),
             h('td', { style: styles.tdRight }, String(row.confidence ?? 1)),
             h('td', { style: styles.tdRight }, h('span', { style: styles.formRow },
               h('button', { style: { ...styles.button, ...styles.buttonMini, ...styles.buttonPrimary }, disabled: busy, onClick: () => run({ action: 'review', accept: row.id }) }, '接受'),
@@ -787,8 +801,8 @@ window.__ModuleLoader__.load({
         { path: 'enabled', label: '每次任务前自动参考画像', type: 'bool', hint: '关掉后任何任务都不会自动带上画像' },
         { path: 'inject.priorityOnPersonalize', label: '个性化需求时以画像为主要依据', type: 'bool', hint: '涉及风格、口味、默认选择、文案、推荐、界面时，画像不再只是背景，而是选方案的主要依据' },
         { path: 'inject.mode', label: '什么时候参考', type: 'select', options: ['always', 'on-request'], optionLabels: ['每轮都带（always）', '只在被要求时带（on-request）'] },
-        { path: 'inject.maxChars', label: '最多带多少字', type: 'number', hint: '超长时按优先级截断，重要条目优先' },
-        { path: 'inject.topK', label: '最多带多少条', type: 'number', hint: '核心条目之外还能带几条' },
+        { path: 'inject.maxChars', label: '最多带多少字', type: 'number', hint: '0 表示不设上限（条目质量靠有效性闸门把关，不靠截断）' },
+        { path: 'inject.topK', label: '最多带多少条', type: 'number', hint: '0 表示不设上限；填正数时只限制「背景参考」段' },
         { path: 'build.minEvidenceForPortrait', label: '至少多少条才启用', type: 'number', hint: '不足时不参考画像，避免拿一条样本当结论' },
       ] },
       { group: '说法冲突时', fields: [
@@ -803,7 +817,14 @@ window.__ModuleLoader__.load({
       { group: '更新与隐私', fields: [
         { path: 'build.autoBuild', label: '画像随对话自动更新', type: 'bool', hint: '关掉后只在点「立即更新」时重算' },
         { path: 'capture.turnText', label: '允许读取对话正文来提炼', type: 'bool', hint: '正文只进模型、不落盘；关掉就只能靠你自己说过的内容' },
-        { path: 'redaction.mode', label: '敏感信息处理', type: 'text', hint: 'unknown 表示规则还没确认，此时不做任何替换' },
+        { path: 'redaction.mode', label: '敏感信息处理', type: 'select', options: ['preset', 'patterns', 'unknown'], optionLabels: ['自动抹掉手机号·邮箱·证件号·密钥（preset）', '只用自定义规则（patterns）', '先别动（unknown）'] },
+      ] },
+      { group: '云端备份（WebDAV）', fields: [
+        { path: 'backup.webdav.url', label: 'WebDAV 地址', type: 'text', hint: '例如 https://dav.example.com/remote.php/dav/files/me' },
+        { path: 'backup.webdav.username', label: '账号', type: 'text' },
+        { path: 'backup.webdav.passwordEnv', label: '密码所在的环境变量名', type: 'text', hint: '默认 DSH_PROFILE_WEBDAV_PASSWORD；密码本身不写进配置文件' },
+        { path: 'backup.webdav.remoteDir', label: '远端目录', type: 'text', hint: '不存在会自动创建' },
+        { path: 'backup.webdav.autoUploadOnBuild', label: '每次重建后自动上传', type: 'bool', hint: '默认关：网络写入不该由一次普通重建触发' },
       ] },
     ]
 
@@ -881,6 +902,7 @@ window.__ModuleLoader__.load({
       const [armed, setArmed] = React.useState(false)
       const [snapArmed, setSnapArmed] = React.useState('')
       const [showAllSnaps, setShowAllSnaps] = React.useState(false)
+      const [davDir, setDavDir] = React.useState('')
       const snapshots = Array.isArray(data.snapshots) ? data.snapshots : []
       const visibleSnaps = showAllSnaps ? snapshots : snapshots.slice(0, 5)
       return h('div', { style: styles.wrap },
@@ -923,6 +945,24 @@ window.__ModuleLoader__.load({
             h('input', { style: { ...styles.input, flex: 1 }, placeholder: '存到哪个文件夹（留空自动按时间命名）', value: out, onChange: (event) => setOut(event.target.value) }),
             h(Btn, { disabled: busy, onClick: () => run({ action: 'export', out }) }, '导出')),
           h('div', { style: styles.note }, '导出的是画像条目、待审候选、变更记录与设置。')),
+        h(Section, { title: '体检 · 脱敏 · 云端备份', extra: h('span', { style: styles.note }, '质量与隐私的日常维护') },
+          h('div', { style: styles.formRow },
+            h(Btn, { mini: true, disabled: busy, onClick: () => run({ action: 'validate' }) }, '体检条目'),
+            h(Btn, { mini: true, disabled: busy, onClick: () => run({ action: 'redact' }) }, '扫描敏感信息'),
+            h(Btn, { mini: true, tone: 'danger', disabled: busy, onClick: () => run({ action: 'redact', apply: true }) }, '脱敏并写回')),
+          h('div', { style: styles.note }, '体检只报告不改数据：查结构是否被破坏、维度是否还有效、置信度是否越界、以及哪些条目看起来像「本次任务的细节」。脱敏按手机号 / 邮箱 / 证件号 / 密钥四类预设匹配，写回前会自动留一份恢复点。'),
+          h('div', { style: { marginTop: '14px' } },
+            h('div', { style: styles.formRow },
+              h('input', {
+                style: { ...styles.input, flex: 1 },
+                placeholder: '本地导出目录（留空则不导出；WebDAV 需先在「设置」里填地址）',
+                value: davDir,
+                onChange: (event) => setDavDir(event.target.value),
+              }),
+              h(Btn, { mini: true, disabled: busy || davDir.trim() === '', onClick: () => run({ action: 'backup', mode: 'out', dir: davDir.trim() }) }, '导出到本地'),
+              h(Btn, { mini: true, disabled: busy, onClick: () => run({ action: 'backup', mode: 'upload' }) }, '上传到 WebDAV'),
+              h(Btn, { mini: true, disabled: busy, onClick: () => run({ action: 'backup', mode: 'list' }) }, '看远端备份')),
+            h('div', { style: styles.note }, 'WebDAV 的地址与账号在「设置 → 云端备份」里填；密码建议放环境变量 DSH_PROFILE_WEBDAV_PASSWORD，不写进配置文件。'))),
         h(Section, { title: '批量导入', extra: h('span', { style: styles.note }, '接受 [{"dim","fact","key"}] 或 {"items":[…]}]，也认一行一条的 JSONL') },
           h('textarea', { style: styles.textarea, value: json, placeholder: '[{ "dim": "taste", "fact": "用户偏好结论先行", "confidence": 0.9 }]', onChange: (event) => setJson(event.target.value) }),
           h('div', { style: styles.formRow },
@@ -1083,7 +1123,14 @@ window.__ModuleLoader__.load({
         title: '关闭',
       }, '×'))
 
-      return h('div', { style: styles.wrap }, header, noticeLine, tabBar, body)
+      // 数据完整性告警（坏行被隔离、配置文件损坏后重建）：必须显式说出来，
+      // 悄悄自愈比报错更危险——用户会以为数据一直好好的。
+      const warnings = Array.isArray(data.warnings) ? data.warnings : []
+      const warningsLine = warnings.length === 0 ? null : h('div', {
+        style: { ...styles.notice, borderLeft: `2px solid ${T.warn}`, color: T.label1 },
+      }, `数据提示：${warnings.join('；')}`)
+
+      return h('div', { style: styles.wrap }, header, warningsLine, noticeLine, tabBar, body)
     }
 
     // `exports.inject = ['slots']` 只是激活顺序提示，不改变依赖注入。

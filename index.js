@@ -368,11 +368,11 @@ const ACTION_ROUTE = '/user-profile/action'
   // 面板不能只读：用户想加一条、删一条、裁决一条待审候选时，不该被逼回命令行。
   // 这里只做「把面板表单翻译成 CLI 调用」这一件事，写入语义全部复用 CLI，
   // 保证面板和命令行产生完全一样的数据（同一套校验、同一份审计）。
-  function runCli(args) {
+  function runCli(args, timeoutMs = 15000) {
     try {
       const out = execFileSync(process.execPath, [CLI_PATH, ...args], {
         encoding: 'utf8',
-        timeout: 15000,
+        timeout: timeoutMs,
         env: process.env,
         windowsHide: true,
       })
@@ -443,6 +443,28 @@ const ACTION_ROUTE = '/user-profile/action'
         return runCli(['dims', 'remove', input.id])
       }
       return runCli(['dims', 'list'])
+    },
+    /** 体检：默认只报告，不动数据；带 quarantine 才把不合格条目隔离出库。 */
+    validate(input) {
+      const args = ['validate']
+      if (input?.pending === true) args.push('--pending')
+      if (input?.quarantine === true) args.push('--quarantine')
+      return runCli(args)
+    },
+    /** 脱敏：默认只统计「有几条含敏感内容」，apply 才真写回（写回前自动留快照）。 */
+    redact(input) {
+      return runCli(input?.apply === true ? ['redact', '--apply'] : ['redact'])
+    },
+    /** 备份：dry-run 只算体积 / out 本地导出 / upload 推 WebDAV / list 列远端。 */
+    backup(input) {
+      const mode = typeof input?.mode === 'string' ? input.mode : 'dry-run'
+      if (mode === 'out') {
+        if (typeof input.dir !== 'string' || input.dir.length === 0) return { ok: false, error: '缺少 dir' }
+        return runCli(['backup', '--out', input.dir])
+      }
+      if (mode === 'list') return runCli(['backup', '--list'], 40000)
+      if (mode === 'upload') return runCli(['backup'], 60000)
+      return runCli(['backup', '--dry-run'], 40000)
     },
     build() {
       return runCli(['build', '--all-scopes'])
@@ -707,8 +729,16 @@ const ACTION_ROUTE = '/user-profile/action'
     return facts
   }
 
-  const writeFacts = (facts, minConfidence, requireGlobal = true) => {
-    let written = 0
+  /** 会话标识：宿主不同版本暴露的字段不一样，能拿到哪个用哪个，拿不到就不记。 */
+  const sessionIdOf = (session) => {
+    for (const key of ['id', 'sessionId', 'key', 'title']) {
+      const value = session?.[key]
+      if (typeof value === 'string' && value.length > 0) return value
+    }
+    return undefined
+  }
+
+  const writeFacts = (facts, minConfidence, requireGlobal = true, origin = {}) => {    let written = 0
     for (const fact of facts) {
       // 「只有可能应用到全局的才录入」：一次性的、只跟这个项目有关的一律不写进画像。
       if (requireGlobal && fact.scope !== 'global') {
@@ -724,6 +754,11 @@ const ACTION_ROUTE = '/user-profile/action'
         '--scope', fact.scope === 'project' ? 'project' : 'global',
       ]
       if (fact.key !== undefined) args.push('--key', fact.key)
+      // 溯源：记下这一条是从哪个会话、第几轮、用户哪句话里提炼的。
+      // 没有它，「这条到底怎么来的」只能靠翻日志；有了它，面板上悬停就能看到原话。
+      if (typeof origin.session === 'string' && origin.session.length > 0) args.push('--session', origin.session)
+      if (Number.isFinite(origin.turn)) args.push('--turn', String(origin.turn))
+      if (typeof origin.excerpt === 'string' && origin.excerpt.length > 0) args.push('--excerpt', origin.excerpt.slice(0, 80))
       // 低置信的先进待审：面板上能看到，但默认不进注入，避免模型猜的东西污染画像。
       if (fact.confidence < minConfidence) args.push('--pending')
       try {
@@ -839,7 +874,14 @@ const ACTION_ROUTE = '/user-profile/action'
         return
       }
       const minConfidence = Number.isFinite(ex.autoAcceptConfidence) ? ex.autoAcceptConfidence : 0.7
-      if (writeFacts(facts, minConfidence, ex.requireGlobal !== false) === 0) return
+      // 溯源的三个字段都能缺：拿不到会话 id 就只记时间与原话，不编造。
+      const firstUserText = buffer.find((item) => item.who === 'user')?.text ?? ''
+      const origin = {
+        session: sessionIdOf(session),
+        turn: turns,
+        excerpt: firstUserText.slice(0, 80),
+      }
+      if (writeFacts(facts, minConfidence, ex.requireGlobal !== false, origin) === 0) return
       // 立刻重建一次，下一轮 pre-step 就能读到大模型刚提炼出来的条目。
       try {
         execFileSync(process.execPath, [CLI_PATH, 'build', '--all-scopes'], {

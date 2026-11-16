@@ -221,8 +221,8 @@ const expectations = {
   待审: ['待审候选', '候选'],
   冲突与历史: ['冲突判定', '历史留档'],
   维度: ['画像大类', '新增维度'],
-  设置: ['每次任务前自动参考画像', '保存并重建', '自动合并重复条目'],
-  备份与重置: ['恢复点', '导出备份', '批量导入', '重置全部数据'],
+  设置: ['每次任务前自动参考画像', '保存并重建', '自动合并重复条目', 'WebDAV 地址'],
+  备份与重置: ['恢复点', '导出备份', '批量导入', '体检条目', '扫描敏感信息', '上传到 WebDAV'],
 }
 for (const [tab, needles] of Object.entries(expectations)) {
   const text = seen[tab] ?? ''
@@ -238,6 +238,9 @@ check('外壳有「立即更新」主按钮', shellText.includes('立即更新')
 const itemText = seen['条目'] ?? ''
 check('条目页有权重加减按钮', itemText.includes('＋') && itemText.includes('－'), itemText.slice(0, 80))
 check('条目页显示权重等级（高/中/低）', /高|中|低/.test(itemText))
+// 溯源：条目副行要说清「这条是谁说的、什么时候」的形态（数据里有 provenance 才显示）
+check('条目页副行保留更新时间', itemText.includes('更新于'), itemText.slice(0, 80))
+check('备份页有体检 / 脱敏 / 备份三组入口', /体检条目/.test(seen['备份与重置'] ?? '') && /脱敏/.test(seen['备份与重置'] ?? '') && /WebDAV/.test(seen['备份与重置'] ?? ''))
 
 process.stdout.write(failures === 0 ? '\n渲染烟测全部通过\n' : `\n渲染烟测失败 ${failures} 项\n`)
 process.exit(failures === 0 ? 0 : 1)

@@ -67,6 +67,10 @@ try {
 // 8 数据目录
 ok('数据目录已初始化', existsSync(join(DSH, 'user-profile', 'config.json')), join(DSH, 'user-profile'))
 
+// 9 MCP 入口：别的宿主（Claude Code / Cursor）靠它接同一份画像
+const mcpEntry = join(INSTALLED, 'mcp', 'server.mjs')
+ok('MCP server 随包安装', existsSync(mcpEntry), mcpEntry)
+
 const width = Math.max(...results.map((r) => r.name.length))
 for (const r of results) {
   console.log(`${r.pass ? 'PASS' : 'FAIL'}  ${r.name.padEnd(width)}  ${r.detail}`)

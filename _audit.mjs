@@ -76,10 +76,13 @@ const cfgOf = (home) => readJson(home, 'config.json')
   const cfg = cfgOf(home)
   const len = Number(cfg.inject.maxChars)
   ok('set 拒绝非数字', a.code !== 0 && Number.isFinite(Number(cfg.inject.maxChars)), `code=${a.code}`)
-  ok('set 拒绝负数或夹到合法范围', Number.isFinite(len) && len > 0, `maxChars=${cfg.inject.maxChars}`)
+  // v15 起 0 是合法值（= 不设上限），负数必须拒；这里分别验证「拒负」与「0 被接受」。
+  ok('set 拒绝负数', b.code !== 0, `code=${b.code}`)
+  ok('0 表示不设上限，被接受', c.code === 0 && len === 0, `maxChars=${cfg.inject.maxChars}`)
+  const tiny = run(home, ['set', 'inject.maxChars', '120', '--rebuild'])
   const build = run(home, ['build', '--all-scopes'])
   const inject = existsSync(join(home, 'inject.md')) ? readFileSync(join(home, 'inject.md'), 'utf8') : ''
-  ok('极小预算下 build 不炸且产物非空', build.code === 0 && inject.length > 0, `${inject.length} 字符`)
+  ok('极小预算下 build 不炸且产物非空', tiny.code === 0 && build.code === 0 && inject.length > 0, `${inject.length} 字符`)
 }
 
 // ---------------------------------------------------------------- 4. 未知配置键

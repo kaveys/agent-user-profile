@@ -39,6 +39,8 @@ const SYNC = [
   'CONTRIBUTING.md',
   'SECURITY.md',
   'docs/CHANGES-v14.md',
+  'docs/CHANGES-v15.md',
+  'mcp/server.mjs',
   'docs/CHANGES-v13.md',
   'docs/CHANGES-v3.md',
   'docs/CHANGES-v3.1.md',
