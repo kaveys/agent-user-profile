@@ -32,7 +32,7 @@ const SYNC = [
   'docs/POSITIONING.md',
   '_audit.mjs',
   '_audit2.mjs',
-  '_e2e.mjs',
+  '_e2e.mjs', 'scripts/build-video.ps1',
   '_render.mjs',
   'README.en.md',
   'CHANGELOG.md',
@@ -48,7 +48,7 @@ const SYNC = [
   'bin/profile.mjs',
   'scripts/register.mjs',
   'scripts/verify-install.mjs',
-  '_selftest.mjs', '_e2e.mjs', '_render.mjs',
+  '_selftest.mjs', '_e2e.mjs', 'scripts/build-video.ps1', '_render.mjs',
 ]
 if (INSTALLED !== HERE && existsSync(join(INSTALLED, 'package.json'))) {
   let copied = 0

@@ -6,7 +6,7 @@
 
 [![tests](docs/badges/tests.svg)](#tests) [![license](docs/badges/license.svg)](LICENSE) [![node](docs/badges/node.svg)](#requirements)
 
-**[39-second intro video](docs/video/intro.mp4)** · [中文 README](README.md)
+**[58-second narrated intro (Chinese)](docs/video/intro-60s.mp4)** · [silent 39s teaser](docs/video/intro.mp4) · [中文 README](README.md)
 
 ---
 
