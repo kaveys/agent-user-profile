@@ -193,6 +193,7 @@ const DEFAULT_CONFIG = {
     priorityOnPersonalize: true,
     // 只带入和本轮相关的条目（流程第 5 步：记忆不自动扩散）；关掉则整份画像全带
     relevantOnly: true,
+    relevanceFloor: 0.12,
     announceSuppressed: true,
     maxAgeDays: 30,
     // 注入块尾部附一句「轮末可 declare --pending」，把自动蒸馏变成可审核的候选
@@ -1714,6 +1715,7 @@ function cmdPanel() {
         personalizeDimensions: [...(config.inject.personalizeDimensions ?? DEFAULT_CONFIG.inject.personalizeDimensions)],
         priorityOnPersonalize: config.inject.priorityOnPersonalize !== false,
         relevantOnly: config.inject.relevantOnly !== false,
+      relevanceFloor: Number(config.inject?.relevanceFloor ?? 0.12),
         distillHint: config.inject.distillHint !== false,
         announceSuppressed: config.inject.announceSuppressed !== false,
       },
@@ -1727,6 +1729,7 @@ function cmdPanel() {
         autoBuildMinIntervalMs: config.build.autoBuildMinIntervalMs,
         dedupe: config.build.dedupe !== false,
         similarityThreshold: config.build.similarityThreshold,
+        includeObservedItems: config.build.includeObservedItems === true,
       },
       extract: {
         enabled: config.extract?.enabled !== false,
@@ -1734,8 +1737,20 @@ function cmdPanel() {
         autoAcceptConfidence: config.extract?.autoAcceptConfidence ?? 0.6,
         maxFactsPerTurn: config.extract?.maxFactsPerTurn ?? 5,
         timeoutMs: config.extract?.timeoutMs ?? 45000,
+        provider: config.extract?.provider ?? '',
+        model: config.extract?.model ?? '',
+        minInputChars: config.extract?.minInputChars ?? 60,
+        maxInputChars: config.extract?.maxInputChars ?? 6000,
+        requireGlobal: config.extract?.requireGlobal !== false,
+        maxOutputTokens: config.extract?.maxOutputTokens ?? 900,
+        debugLog: config.extract?.debugLog === true,
       },
-      capture: { turnText: config.capture?.turnText !== false },
+      capture: {
+        turnText: config.capture?.turnText !== false,
+        turnSignals: config.capture?.turnSignals !== false,
+        toolNames: config.capture?.toolNames !== false,
+        userText: config.capture?.userText === true,
+      },
       redaction: { mode: config.redaction.mode, presets: config.redaction.presets ?? [] },
       // 面板只能看到配置里「要不要传、传到哪」，密码永远不从这里出来。
       backup: {
@@ -1746,6 +1761,7 @@ function cmdPanel() {
           passwordEnv: config.backup?.webdav?.passwordEnv ?? 'DSH_PROFILE_WEBDAV_PASSWORD',
           remoteDir: config.backup?.webdav?.remoteDir ?? 'dsh-user-profile',
           autoUploadOnBuild: config.backup?.webdav?.autoUploadOnBuild === true,
+          timeoutMs: config.backup?.webdav?.timeoutMs ?? 20000,
         },
       },
       scope: { id: activeScope({}, config).id },
@@ -2335,6 +2351,7 @@ const SET_SPEC = {
   'inject.personalizeDimensions': { type: 'dimensionList', note: '个性化需求时的主要依据' },
   'inject.priorityOnPersonalize': { type: 'boolean', note: '个性化轮是否以画像为主要依据' },
   'inject.relevantOnly': { type: 'boolean', note: '只带入和本轮相关的条目（红线永远带入）' },
+  'inject.relevanceFloor': { type: 'number', min: 0, max: 1, note: '相关性门槛：低于这个比例算与本轮无关（默认 0.12）' },
   'inject.announceSuppressed': { type: 'boolean', note: '喊停时是否在结果里声明' },
   'inject.distillHint': { type: 'boolean', note: '注入块尾部是否附轮末候选提示' },
   'conflicts.strategy': { type: 'enum', values: ['newest', 'freeze'], note: 'newest=新值覆盖；freeze=谁都不选边' },

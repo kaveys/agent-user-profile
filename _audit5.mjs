@@ -73,7 +73,7 @@ function leafPaths(object, prefix = '') {
 }
 
 const setList = run(['set', 'list']).out
-const settingsKeys = leafPaths(panel?.settings ?? {}).filter((path) => path !== 'enabled')
+const settingsKeys = leafPaths(panel?.settings ?? {})
 const unsettable = settingsKeys.filter((path) => !setList.includes(path))
 check(
   'A1 面板上的每个可编辑字段都能用 set 改（无漂移）',
@@ -81,9 +81,14 @@ check(
   unsettable.join(', '),
 )
 
-const specOnly = ['inject.maxChars', 'inject.topK', 'inject.relevantOnly', 'inject.mode', 'conflicts.strategy']
-const missingInPayload = specOnly.filter((path) => !settingsKeys.includes(path))
-check('A2 set 支持的关键字段都出现在面板 payload 里', missingInPayload.length === 0, missingInPayload.join(', '))
+// 双向核对：set 支持的每一个键，面板 payload 里都得有；反之亦然（A1 已查另一向）。
+const specPaths = setList
+  .split('\n')
+  .map((line) => line.trim())
+  .filter((line) => /^[a-z][\w.]*\s+(number|boolean|enum|dimensionList|list|string)/.test(line))
+  .map((line) => line.split(/\s+/)[0])
+const missingInPayload = specPaths.filter((path) => !settingsKeys.includes(path))
+check('A2 set 支持的每个键都能在面板 payload 里看到', specPaths.length > 10 && missingInPayload.length === 0, missingInPayload.join(', ') || `只解析到 ${specPaths.length} 个键`)
 
 // ---------------------------------------------------------------- B. 计数自洽
 const items = panel?.items ?? []

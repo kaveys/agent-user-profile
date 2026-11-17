@@ -829,6 +829,7 @@ window.__ModuleLoader__.load({
       ] },
       { group: '更新与隐私', fields: [
         { path: 'inject.relevantOnly', label: '只带入和本轮相关的条目', type: 'bool', hint: '关掉则每次把整份画像都带进来（红线永远带入）' },
+        { path: 'inject.relevanceFloor', label: '相关性门槛', type: 'number', hint: '0–1，默认 0.12：低于这个比例算与本轮无关；红线与核心条目不受影响' },
         { path: 'build.autoBuild', label: '画像随对话自动更新', type: 'bool', hint: '关掉后只在点「立即更新」时重算' },
         { path: 'capture.turnText', label: '允许读取对话正文来提炼', type: 'bool', hint: '正文只进模型、不落盘；关掉就只能靠你自己说过的内容' },
         { path: 'redaction.mode', label: '敏感信息处理', type: 'select', options: ['preset', 'patterns', 'unknown'], optionLabels: ['自动抹掉手机号·邮箱·证件号·密钥（preset）', '只用自定义规则（patterns）', '先别动（unknown）'] },
