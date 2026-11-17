@@ -41,7 +41,7 @@ check('同义改写仍被判为同义（重构没改阈值）', mergeScore(...pa
 check('插值过的主语不影响判定', mergeScore(...separation) >= 0.5, `score=${mergeScore(...separation).toFixed(2)}`)
 check('无关条目仍判为不同', mergeScore(...unrelated) < 0.2, `score=${mergeScore(...unrelated).toFixed(2)}`)
 check('数字不同永不判同义（班级/条数/版本）', mergeScore('用户要求并发写入第 1 条', '用户要求并发写入第 2 条') === 0)
-check('一边有数字一边没有也不合并', mergeScore('用户要求记住 262 班', '用户要求记住班级') === 0)
+check('一边有数字一边没有也不合并', mergeScore('用户要求记住 1 班', '用户要求记住班级') === 0)
 check('一句话被另一句完整包含时覆盖率接近 1', coverage('用户要求界面简洁', '用户要求界面简洁，不要花哨动画') >= 0.9)
 check('完全相同得 1 分', similarity('同样的句子', '同样的句子') === 1)
 check('标点与空白不影响相似度', similarity('界面要简洁。', '界面要简洁') === 1, normText('界面要简洁。'))
