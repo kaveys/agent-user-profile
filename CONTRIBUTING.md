@@ -14,14 +14,14 @@ Thanks for looking. This project is small on purpose: one storage CLI, one host 
 
 ```bash
 node --check index.js && node --check client.js && node --check bin/profile.mjs
-node _selftest.mjs
-node _e2e.mjs          # starts its own temp HOME; the HTTP part needs a running DSH
-node _audit.mjs
-node _render.mjs
+node tests/selftest.mjs
+node tests/e2e.mjs          # starts its own temp HOME; the HTTP part needs a running DSH
+node tests/audit-1.mjs
+node tests/render.mjs
 node scripts/verify-install.mjs
 ```
 
-All five must be green. If you change rendered text in the panel, update `_render.mjs` assertions in the same commit — they exist precisely because `node --check` cannot see a broken `map()`.
+All five must be green. If you change rendered text in the panel, update `tests/render.mjs` assertions in the same commit — they exist precisely because `node --check` cannot see a broken `map()`.
 
 ## Adding a dimension
 
@@ -31,7 +31,7 @@ Built-in categories are in `DIMENSIONS` (`bin/profile.mjs`) and mirrored by `DIM
 2. add the same hint to `DIMENSION_GUIDE`;
 3. bump `DEFAULT_CONFIG.schemaVersion`;
 4. add a migration branch if old entries need reclassification;
-5. add a `_selftest.mjs` case.
+5. add a `tests/selftest.mjs` case.
 
 ## Commit messages
 

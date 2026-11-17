@@ -1,8 +1,0 @@
-file '01-hook.mp4'
-file '02-pain.mp4'
-file '03-bidirectional.mp4'
-file '04-evidence.mp4'
-file '05-tests.mp4'
-file '06-norestart.mp4'
-file '07-proof.mp4'
-file '08-outro.mp4'

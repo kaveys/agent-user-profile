@@ -27,7 +27,7 @@
 - 算法 AES-256-GCM，密钥用 scrypt 从口令派生（16 字节随机盐、12 字节 IV，每次导出都不同）。
 - 口令来源优先级：`--passphrase` → `DSH_PROFILE_PASSPHRASE` → `secrets.json` 的 `profilePassphrase`；口令长度不足 6 位直接拒绝。
 - 加密包是 `{"kind":"dsh-user-profile-backup-sealed", ...}`，`profile unseal --file <包>` 还原成可 `import` 的 JSON；口令错时 GCM 校验失败并报「口令不对，或文件被改动过」，不会产出半截数据。
-- **本机磁盘没有全库加密**：数据在 `~/.dsh/user-profile/`，靠操作系统账户隔离。理由写在 `docs/CHANGES-v17.md`——全库加密要求每次 CLI 调用都带口令，收益只覆盖「硬盘被拿走」这一种场景。
+- **本机磁盘没有全库加密**：数据在 `~/.dsh/user-profile/`，靠操作系统账户隔离。理由写在 `docs/changelog/CHANGES-v17.md`——全库加密要求每次 CLI 调用都带口令，收益只覆盖「硬盘被拿走」这一种场景。
 
 ## 高风险隐私直接不收（v17）
 

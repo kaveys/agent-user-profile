@@ -53,21 +53,43 @@ node bin/profile.mjs panel | head -40                                     # 面�
 ## 结构
 
 ```
-dsh-user-profile/
-├── index.js             插件本体：采集钩子（session/event）+ 注入钩子（agent/pre-step）+ 面板数据路由
-├── client.js            浏览器侧：设置页「用户画像」页签（手写 CJS-loader bundle，无需构建）
-├── bin/profile.mjs      存储层 CLI（v2）
-├── cordis.patch.yml     注册补丁片段
-├── scripts/register.mjs 幂等注册进 ~/.dsh/cordis.patch.yml（自动备份）
-├── _selftest.mjs        注入/采集/提炼 单元级用例
-├── _e2e.mjs             33+ 项真实 CLI 与 HTTP 动作自检
-├── _render.mjs          面板渲染烟测（不启动浏览器）
-├── DESIGN.md            设计文档
-├── docs/POSITIONING.md  定位、命名与移植到其它宿主
-├── docs/CHANGES-*.md    每版变更记录
-├── LICENSE              MIT
-└── README.md
+agent-user-profile/
+├── index.js                 插件本体：采集钩子 + 注入钩子 + 面板路由 + 智能提炼 + 语义合并
+├── client.js                浏览器侧：设置页七页签（手写 CJS-loader bundle，无需构建）
+├── bin/profile.mjs          存储层 CLI：全部数据操作都在这里
+├── lib/
+│   ├── text.mjs             纯判定数学（相似度 / 覆盖度 / 合并分），CLI 与插件共用
+│   └── relevance.mjs        相关性闸门（命中 + 权重保底），CLI 与注入共用同一函数
+├── mcp/server.mjs           MCP server（stdio，12 个工具），给别的宿主接同一份画像
+├── cordis.patch.yml         注册补丁片段
+├── scripts/
+│   ├── register.mjs         幂等注册（备份 patch + 建 profile 链接 + 同步源码）
+│   ├── verify-install.mjs   安装体检：12 项真实加载路径核对
+│   ├── tts.py               旁白合成（edge-tts）
+│   ├── build-trailer.ps1    介绍片渲染（GDI+ 画帧 + ffmpeg）
+│   ├── restart-dsh.cmd      重启（让 index.js 与新增 action 生效）
+│   └── publish-github.ps1   发布到 GitHub（gh 登录 → 建仓库 → 推送，失败退回 ssh 443）
+├── tests/
+│   ├── selftest.mjs         单元级用例（注入 / 采集 / 提炼 / 合并 / 保底）
+│   ├── audit-1…9.mjs        九轮对抗排查，各自盯一个角度（边界、往返、逻辑、MCP、漂移、
+│   │                        输入形状、搬迁、合并、explain 一致性）
+│   ├── audit-10.mjs         重构等价性与仓库自洽（引用路径是否真实存在）
+│   ├── e2e.mjs              端到端：真实 CLI + 真实 HTTP（CI 用 --cli-only）
+│   ├── render.mjs           面板渲染烟测（不启动浏览器）
+│   └── compat.mjs           降级宿主矩阵（缺 webServer / connection / llm / loader）
+├── docs/
+│   ├── POSITIONING.md       定位、命名与移植到其它宿主
+│   ├── COMPATIBILITY.md     宿主 API 探测方式与降级后果
+│   ├── changelog/           每版变更记录（CHANGES-v*.md）
+│   ├── screenshots/         设置页真机截图
+│   ├── video/               介绍片与字幕
+│   └── notes/               调研笔记（非交付物）
+├── DESIGN.md                设计文档（六节：概述 / 模块 / 数据结构 / 叠加规则 / 使用维护 / 待补充）
+├── CHANGELOG.md · CONTRIBUTING.md · SECURITY.md · LICENSE
+└── README.md · README.en.md
 ```
+
+仓库里没有 `node_modules`、没有构建产物、没有任何本机路径或真实画像数据：`bin/`、`lib/`、`mcp/`、`index.js` 全是零依赖源码，克隆下来直接 `node bin/profile.mjs status` 就能跑。
 
 ## 安装
 
@@ -223,7 +245,7 @@ dsh-profile declare --dim taste --fact "…" --no-merge   # 就是要单独存
 - **同 key 不并**：那是「覆盖/冲突」，进 `conflicts` 与 history，能看见改过什么（「偏好深色 → 偏好浅色」）。
 - **跨大类更严**（0.8）：措辞几乎一字不差才跨类并，避免「习惯上要简洁」和「口味上偏好简洁」被揉成一条。
 
-合并保留**更可信那条**的措辞（`coverage ≥ 0.92` 时取信息更全的长句），权重取最大、`core` 取或；落败原话进 `mergedFrom`，面板「恢复点」可整批还原。细节见 [CHANGES-v25](docs/CHANGES-v25.md)。
+合并保留**更可信那条**的措辞（`coverage ≥ 0.92` 时取信息更全的长句），权重取最大、`core` 取或；落败原话进 `mergedFrom`，面板「恢复点」可整批还原。细节见 [CHANGES-v25](docs/changelog/CHANGES-v25.md)。
 
 ## 从别的 AI 搬回来（v24）
 
@@ -337,7 +359,7 @@ stdio + 行分隔 JSON-RPC 2.0，**stdout 只走协议、日志全走 stderr**�
 - **设置**：无改动时不摆工具行；有改动才出现品牌描边的粘性条「N 项待保存 · 保存并重建 / 放弃修改」。
 - **备份与重置**：恢复点默认只显示最近 5 份，其余收进「展开全部 N 份」。
 - **顺带补的护栏**：批量删除原来是「一点即批量 forget」（画像被清空三次都是这条路），现在第一下变成「确认删除 N 条」并显示条数，5 秒内再点才执行，事后提示可去恢复点整批还原。
-- 详见 `docs/CHANGES-v10.md`，真机截图在 `docs/screenshots/`。
+- 详见 `docs/changelog/CHANGES-v10.md`，真机截图在 `docs/screenshots/`。
 
 ## 智能提取（v2.2）
 
@@ -386,30 +408,30 @@ $CLI set capture.turnText false
 ## 自测与体检
 
 ```bash
-node _selftest.mjs            # 注入 / 采集 / 提炼 的单元级用例（隔离 temp HOME）
-node _e2e.mjs                 # 42 项真实 CLI 与 HTTP 动作自检（会打运行中的 dsh；--cli-only 跳过 HTTP）
-node _audit.mjs               # 33 项对抗式边界检查（脏输入 / 冲突操作 / 锁 / 作用域）
-node _audit2.mjs              # 34 项往返与极限（导出→重置→导入 / 坏行 / 坏配置 / 快照上限 / 并发）
-node _audit3.mjs              # 51 项逻辑一致性（预算与排序 / 闸门顺序 / MCP 协议 / 面板自洽）
-node _audit4.mjs              # 22 项兼容层自身（能力文件 / doctor / 别名事件 / 降级不崩 / 旧配置迁移）
-node _audit5.mjs              # 31 项「两处说法不一致」（settings↔set / 计数自洽 / health 语义 / explain 语义）
-node _audit6.mjs              # 25 项输入形状与协议错误路径（空查询 / 未来时间戳 / 加密往返 / MCP 错误码）
-node _audit7.mjs              # 25 项「从别的 AI 搬回画像」（预览不写库 / 归类优先级 / 拆句 / 隐私 / 去重 / 溯源）
-node _compat.mjs              # 11 项残缺宿主（只有 ctx.on / 缺 pre-step / 无 ctx.on / 无 next / 旧事件名）
-node _render.mjs             # 面板渲染烟测：7 个页签逐个点 + payload 洁净度
+node tests/selftest.mjs            # 注入 / 采集 / 提炼 的单元级用例（隔离 temp HOME）
+node tests/e2e.mjs                 # 42 项真实 CLI 与 HTTP 动作自检（会打运行中的 dsh；--cli-only 跳过 HTTP）
+node tests/audit-1.mjs               # 33 项对抗式边界检查（脏输入 / 冲突操作 / 锁 / 作用域）
+node tests/audit-2.mjs              # 34 项往返与极限（导出→重置→导入 / 坏行 / 坏配置 / 快照上限 / 并发）
+node tests/audit-3.mjs              # 51 项逻辑一致性（预算与排序 / 闸门顺序 / MCP 协议 / 面板自洽）
+node tests/audit-4.mjs              # 22 项兼容层自身（能力文件 / doctor / 别名事件 / 降级不崩 / 旧配置迁移）
+node tests/audit-5.mjs              # 31 项「两处说法不一致」（settings↔set / 计数自洽 / health 语义 / explain 语义）
+node tests/audit-6.mjs              # 25 项输入形状与协议错误路径（空查询 / 未来时间戳 / 加密往返 / MCP 错误码）
+node tests/audit-7.mjs              # 25 项「从别的 AI 搬回画像」（预览不写库 / 归类优先级 / 拆句 / 隐私 / 去重 / 溯源）
+node tests/compat.mjs              # 11 项残缺宿主（只有 ctx.on / 缺 pre-step / 无 ctx.on / 无 next / 旧事件名）
+node tests/render.mjs             # 面板渲染烟测：7 个页签逐个点 + payload 洁净度
 node scripts/verify-install.mjs   # 13 项安装体检（不重启、不起 dsh）
 ```
 
-`_selftest.mjs` 覆盖：空数据降级、证据不足不注入、两段式注入（核心段 + topK）、同轮不重复注入、
+`tests/selftest.mjs` 覆盖：空数据降级、证据不足不注入、两段式注入（核心段 + topK）、同轮不重复注入、
 喊停不注入但仍提示、作用域隔离、冲突 newest / freeze 两策略、待审候选进/不进画像、panel 权重降序与 rank、面板路由 401/405、
 工具名取自 `tool/call`、config 自动迁移、轮末自动重建、轮末模型提取（高置信入画像 / 低置信进待审 / 非法维度丢弃 / 无 request/header 时路由取自消息 source）、
 并发写不丢记录、陈旧锁自愈、同义去重、drift 一致性自检。
 
-`_audit.mjs` 专挑「看起来能用、边界会出血」的地方：删仍有条目的自定义大类、删内置大类、非法/越界/未知的配置写入、edit 到不存在的维度、merge 自己到自己、空事实、越界权重、未 init 的目录、重复 id 导入、restore 路径穿越、空库 build、`--all-scopes` 是否泄漏别的项目、陈旧锁自愈与新鲜锁不硬闯。
+`tests/audit-1.mjs` 专挑「看起来能用、边界会出血」的地方：删仍有条目的自定义大类、删内置大类、非法/越界/未知的配置写入、edit 到不存在的维度、merge 自己到自己、空事实、越界权重、未 init 的目录、重复 id 导入、restore 路径穿越、空库 build、`--all-scopes` 是否泄漏别的项目、陈旧锁自愈与新鲜锁不硬闯。
 
-`_audit3.mjs` 打的是「逻辑错」而不是「会不会崩」：预算收紧时是不是先裁了红线（规定里最优先的那段）、`topK` 会不会连个性化段一起裁、`本次带入 N 条` 有没有把被裁的算进去、隐私闸门与脱敏的先后顺序、同一句话重复声明是不是变成两条、`--accept all` 在空队列上会不会报错、MCP 的未知工具/未知方法/非法 JSON 是不是明确报错、面板的分区总数与权重排序是否自洽。
+`tests/audit-3.mjs` 打的是「逻辑错」而不是「会不会崩」：预算收紧时是不是先裁了红线（规定里最优先的那段）、`topK` 会不会连个性化段一起裁、`本次带入 N 条` 有没有把被裁的算进去、隐私闸门与脱敏的先后顺序、同一句话重复声明是不是变成两条、`--accept all` 在空队列上会不会报错、MCP 的未知工具/未知方法/非法 JSON 是不是明确报错、面板的分区总数与权重排序是否自洽。
 
-`_render.mjs` 自带一个极简 hooks 运行时（`useState/useCallback/useEffect/createElement`），把**真实的 `ProfileSection`** 渲染成树，
+`tests/render.mjs` 自带一个极简 hooks 运行时（`useState/useCallback/useEffect/createElement`），把**真实的 `ProfileSection`** 渲染成树，
 不需要浏览器也不依赖宿主 —— 面板改版后先跑它，能挡住「页签点了白屏」「字段读错路径」这类只有肉眼才发现的问题。
 
 ## v2.1 修复记录（2026-11-15）

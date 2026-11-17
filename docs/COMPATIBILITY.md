@@ -103,9 +103,9 @@ Node          24.22.2
 
 | 测试 | 覆盖 |
 | --- | --- |
-| `_compat.mjs` | 最简宿主（只有 `ctx.on`）、缺 `agent/pre-step`、连 `ctx.on` 都没有、旧事件名、`pre-step` 不传 `next` —— 全部要求「不抛 + 降级记录正确 + 别名事件照样统计」 |
-| `_audit4.mjs` | 能力文件位置与洁净度、`doctor` 人话/JSON、导出契约、兼容层没踩坏注入口径、别名不双计、畸形事件、MCP 协议、旧配置迁移、面板字段 |
-| `_render.mjs` | 客户端 bundle 在**没有 `slots` 的宿主**上 `apply` 不抛 |
+| `tests/compat.mjs` | 最简宿主（只有 `ctx.on`）、缺 `agent/pre-step`、连 `ctx.on` 都没有、旧事件名、`pre-step` 不传 `next` —— 全部要求「不抛 + 降级记录正确 + 别名事件照样统计」 |
+| `tests/audit-4.mjs` | 能力文件位置与洁净度、`doctor` 人话/JSON、导出契约、兼容层没踩坏注入口径、别名不双计、畸形事件、MCP 协议、旧配置迁移、面板字段 |
+| `tests/render.mjs` | 客户端 bundle 在**没有 `slots` 的宿主**上 `apply` 不抛 |
 
 ## 8. 已知的不可兼容项（说清楚，不装作能）
 

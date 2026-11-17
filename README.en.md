@@ -91,10 +91,10 @@ Requirements: Node >= 20 (uses `node:zlib` zstd for session logs) and a DSH inst
 ## Tests
 
 ```bash
-node _selftest.mjs      # unit: storage, conflict resolution, injection rendering
-node _e2e.mjs           # end-to-end: every CLI command + every HTTP action
-node _audit.mjs         # adversarial: bad input, path traversal, lost data
-node _render.mjs        # renders the real panel component with a tiny hooks runtime
+node tests/selftest.mjs      # unit: storage, conflict resolution, injection rendering
+node tests/e2e.mjs           # end-to-end: every CLI command + every HTTP action
+node tests/audit-1.mjs         # adversarial: bad input, path traversal, lost data
+node tests/render.mjs        # renders the real panel component with a tiny hooks runtime
 node scripts/verify-install.mjs
 ```
 
@@ -106,8 +106,8 @@ client.js              settings panel (hand-written bundle, no build step)
 bin/profile.mjs        storage + rendering + CLI (the portable core)
 cordis.patch.yml       plugin registration for DSH
 scripts/register.mjs   idempotent installer
-_selftest.mjs          unit tests        _e2e.mjs      end-to-end tests
-_audit.mjs             adversarial tests _render.mjs   panel render smoke test
+tests/selftest.mjs          unit tests        tests/e2e.mjs      end-to-end tests
+tests/audit-1.mjs             adversarial tests tests/render.mjs   panel render smoke test
 docs/                  design notes, positioning, changelog
 ```
 

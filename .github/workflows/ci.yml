@@ -19,63 +19,76 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
 
-      # 无依赖：不需要 npm install
+      # 零依赖：不需要 npm install
+
       - name: Syntax check
         run: |
           node --check index.js
           node --check client.js
           node --check bin/profile.mjs
+          node --check lib/text.mjs
+          node --check lib/relevance.mjs
           node --check mcp/server.mjs
-          node --check _selftest.mjs
-          node --check _e2e.mjs
-          node --check _audit.mjs
-          node --check _audit2.mjs
-          node --check _audit3.mjs
-          node --check _audit4.mjs
-          node --check _audit5.mjs
-          node --check _audit6.mjs
-          node --check _audit7.mjs
-      node --check _audit8.mjs
-          node --check _compat.mjs
-          node --check _render.mjs
-          node --check _qa-frames.mjs
+          node --check scripts/register.mjs
+          node --check scripts/verify-install.mjs
+          node --check tests/selftest.mjs
+          node --check tests/e2e.mjs
+          node --check tests/render.mjs
+          node --check tests/compat.mjs
+          node --check tests/qa-frames.mjs
+          node --check tests/audit-1.mjs
+          node --check tests/audit-2.mjs
+          node --check tests/audit-3.mjs
+          node --check tests/audit-4.mjs
+          node --check tests/audit-5.mjs
+          node --check tests/audit-6.mjs
+          node --check tests/audit-7.mjs
+          node --check tests/audit-8.mjs
+          node --check tests/audit-9.mjs
+          node --check tests/audit-10.mjs
 
       - name: Unit tests (storage / conflicts / injection)
-        run: node _selftest.mjs
+        run: node tests/selftest.mjs
 
-      - name: Adversarial audit 1 (edges: dirty input / lock / scope)
-        run: node _audit.mjs
+      - name: Audit 1 — edges (dirty input / lock / scope)
+        run: node tests/audit-1.mjs
 
-      - name: Adversarial audit 2 (corruption / round-trip / limits)
-        run: node _audit2.mjs
+      - name: Audit 2 — corruption / round-trip / limits
+        run: node tests/audit-2.mjs
 
-      - name: Adversarial audit 3 (logic: budget / gates / MCP / panel consistency)
-        run: node _audit3.mjs
+      - name: Audit 3 — logic (budget / gates / MCP / panel consistency)
+        run: node tests/audit-3.mjs
 
-      - name: Adversarial audit 4 (compat layer: caps file / doctor / event aliases)
-        run: node _audit4.mjs
+      - name: Audit 4 — compat layer (caps file / doctor / event aliases)
+        run: node tests/audit-4.mjs
 
-      - name: Adversarial audit 5 (settings ↔ set drift / health / explain)
-        run: node _audit5.mjs
+      - name: Audit 5 — settings ↔ set drift / health / explain
+        run: node tests/audit-5.mjs
 
-      - name: Adversarial audit 6 (input shapes / encryption / protocol errors)
-        run: node _audit6.mjs
+      - name: Audit 6 — input shapes / encryption / protocol errors
+        run: node tests/audit-6.mjs
 
-      - name: Adversarial audit 7 (ingest from another AI)
-        run: node _audit7.mjs
+      - name: Audit 7 — ingest from another AI
+        run: node tests/audit-7.mjs
 
-      - name: Adversarial audit 8 (similar entries are merged actively)
-        run: node _audit8.mjs
+      - name: Audit 8 — similar entries are merged actively
+        run: node tests/audit-8.mjs
+
+      - name: Audit 9 — explain and injection agree
+        run: node tests/audit-9.mjs
+
+      - name: Audit 10 — refactor equivalence and repo consistency
+        run: node tests/audit-10.mjs
 
       - name: Degraded host matrix
-        run: node _compat.mjs
+        run: node tests/compat.mjs
 
       - name: Panel render smoke test
-        run: node _render.mjs
+        run: node tests/render.mjs
 
-      # _e2e.mjs 的 HTTP 段需要运行中的宿主；CI 只跑纯 CLI 段
+      # tests/e2e.mjs 的 HTTP 段需要运行中的宿主；CI 只跑纯 CLI 段
       - name: End-to-end (CLI only)
-        run: node _e2e.mjs --cli-only
+        run: node tests/e2e.mjs --cli-only
 
       - name: Install health check
         run: node scripts/verify-install.mjs

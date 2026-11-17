@@ -135,7 +135,7 @@
 | `evidence` | 指向原始记录 id | 点得回去看原始依据，避免"画像里凭空多出一条" |
 | `source` | `user` / `model` | 用户亲口 vs 模型推断，冲突时用户优先 |
 
-**维度（v6 十大类，见 docs/CHANGES-v6.md）**：`identity` 身份与背景、`work` 学业与职业、`skills` 能力与工具、`habits` 习惯与节奏、`interests` 兴趣与爱好、`taste` 审美与口味、`goals` 目标与计划、`social` 关系与协作、`constraints` 约束与红线、`communication` 沟通与表达。大类下用 `维度.细分` 的 key 分层。
+**维度（v6 十大类，见 docs/changelog/CHANGES-v6.md）**：`identity` 身份与背景、`work` 学业与职业、`skills` 能力与工具、`habits` 习惯与节奏、`interests` 兴趣与爱好、`taste` 审美与口味、`goals` 目标与计划、`social` 关系与协作、`constraints` 约束与红线、`communication` 沟通与表达。大类下用 `维度.细分` 的 key 分层。
 
 > （待补充：用户画像应包含的维度与粒度）。当前 6 维是通用骨架，写在 `config.json.dimensions` 里，改这个数组即可增删维度，无需改代码；**每维内部的粒度（例如 `preferences` 要不要细分到"工具偏好/审美偏好/交付格式偏好"）未确认，暂按"一条一条 fact"扁平存储，靠 `key` 自然分簇。**
 
@@ -232,7 +232,7 @@ $CLI reset --yes                             # 归档清空
 ### 5.4 自测与体检
 
 ```bash
-cd dsh-user-profile && node _selftest.mjs    # 40 条：空/不足/就绪/冲突newest+freeze/两段式注入/喊停/去重/作用域/待审/落盘/关闭/归档/面板401·405·权重降序
+cd dsh-user-profile && node tests/selftest.mjs    # 40 条：空/不足/就绪/冲突newest+freeze/两段式注入/喊停/去重/作用域/待审/落盘/关闭/归档/面板401·405·权重降序
 node scripts/verify-install.mjs              # 12 项安装体检：patch 行、裸包名解析、bundle 形状、主题变量、ESM 导出
 ```
 
@@ -316,7 +316,7 @@ v2.2 把这一步接上模型。
 退回「只有行为信号 + 手动 declare」的 v2.1 行为。模型写入的条目 `source: "model"`，可 `forget --id` 单条删、
 `reset --yes` 整体归档。
 
-可观测点：`status` / `panel` 都显示「声明 N 条（其中模型提炼 M 条）」，`_selftest.mjs` 第 14、15 组覆盖
+可观测点：`status` / `panel` 都显示「声明 N 条（其中模型提炼 M 条）」，`tests/selftest.mjs` 第 14、15 组覆盖
 提取全链路（含无 `request/header` 时路由取自消息 source 的退化路径）。
 
 ### 五点八、边界：任务清单不归本插件管（v3 修正）
@@ -333,7 +333,7 @@ v3 起彻底切分：
 
 本插件已删除：`DEFAULT_CONFIG.todoGuard`、`readConfig` 里的合并行、`todoState`/`guardBlock`/`GUARD_MARKER`/`isGuardMessage`、
 `case 'todo/write'`、pre-step 里的守护段与旧消息过滤、`panel` 对 `todoGuard` 的上报。
-`_selftest.mjs` 第 16 组改为**守边界**：连续 6 次工具调用不得产生任何清单提醒；`todo/write` 的内容不得进入画像注入。
+`tests/selftest.mjs` 第 16 组改为**守边界**：连续 6 次工具调用不得产生任何清单提醒；`todo/write` 的内容不得进入画像注入。
 
 > 教训：两个能力挤在同一注入通道里，看起来只是"顺手加一段"，实际上会让任一方的策略变更都牵连另一方，
 > 也会让用户困惑"到底是谁在提醒我"。互不相关的关注点必须落在不同的插件、不同的数据、不同的钩子里。
@@ -370,7 +370,7 @@ client.js --POST /user-profile/action-----> index.js --> ACTIONS[action] --> exe
 措辞差得多的同义句不会被自动合并，而提高阈值又会误伤 —— 所以把判断权交回人：`merge --keep A --drop B`，
 B 进 A 的 `mergedFrom`，changelog 记 `kind:'merge'`。
 
-**为什么新增 `_render.mjs`**：面板改版最大的风险是「点了页签白屏」。该脚本自带极简 hooks 运行时，
+**为什么新增 `tests/render.mjs`**：面板改版最大的风险是「点了页签白屏」。该脚本自带极简 hooks 运行时，
 把真实 `ProfileSection` 渲染成树并逐个页签点击断言文案，不依赖宿主与浏览器。三个坑：
 每个组件要有独立 hook store；setter 必须绑定自己那份 store；`createElement` 必须把子节点塞进 `props.children`。
 
@@ -443,7 +443,7 @@ snapshots/declarations-restore-<ts>.jsonl   ← 恢复前（恢复也可能恢�
 h('span', {...}, snap.name)   // ← 这里 snap 已不在作用域
 ```
 
-`node --check` 不报（语法合法），运行到「备份与重置」页才 `ReferenceError`。**只有把真实组件渲染出来才能抓到** —— 这正是 `_render.mjs` 存在的理由：它不模拟浏览器，而是用最小 hooks 运行时把组件跑一遍再断言文案。
+`node --check` 不报（语法合法），运行到「备份与重置」页才 `ReferenceError`。**只有把真实组件渲染出来才能抓到** —— 这正是 `tests/render.mjs` 存在的理由：它不模拟浏览器，而是用最小 hooks 运行时把组件跑一遍再断言文案。
 
 ---
 
@@ -482,7 +482,7 @@ v11 之前的准入标准是「跨会话可复用」，它会放过「这个仓�
 3. **（待补充：用户数据的存储位置与存储格式）**
    当前默认：本地 `~/.dsh/user-profile`，JSONL + JSON + Markdown，不加密、不上传。是否需要加密、是否需要跨机同步、是否改到某个指定目录，待定。
 4. **（待补充：用户画像应包含的维度与粒度）**
-   v6 起为十大类，每类下用 `key`（如 `skills.editor`）分层；大类增删改走 `profile dims add/remove`，落盘在 `config.json.dimensions` + `dimensionLabels`。为何是十类、老六维如何迁移，见 `docs/CHANGES-v6.md`。
+   v6 起为十大类，每类下用 `key`（如 `skills.editor`）分层；大类增删改走 `profile dims add/remove`，落盘在 `config.json.dimensions` + `dimensionLabels`。为何是十类、老六维如何迁移，见 `docs/changelog/CHANGES-v6.md`。
 5. **（待补充：画像的更新触发时机与更新频率）**
    当前：采集每轮自动，`build` 由模型/用户显式触发（可能落后若干轮）。是否需要"每 N 轮自动 build""每日定时 build""轮末强制 build"，待定；定时能力可接 DSH automation，但未启用。
 6. **（待补充：数据授权、隐私与敏感信息的处理方式）**

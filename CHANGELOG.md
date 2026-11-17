@@ -19,10 +19,10 @@ Plugin version bumped to **0.3.0**. package.json gains dsh.compat = { hosts: ">=
 - **Paths frozen at module load**: cached(p('inject.md'), ...) captured DSH_USER_PROFILE_HOME at import time, so changing the data directory (tests, profile switching, MCP process reuse) still injected the previous user's portrait. All four readers (inject.md, profile.md, config.json, profile.json) now resolve the path per call and cache per final path.
 - **export const inject = ['loader'] was a hard dependency**: hosts without loader refused to load the plugin at all. Now [], with runtime detection.
 - **Client apply threw without slots**: hosts lacking settings.section lost the whole settings page instead of one tab. Now guarded; inject no longer declares slots.
-- _render.mjs assertion that froze the old inject = ['slots'] contract.
+- tests/render.mjs assertion that froze the old inject = ['slots'] contract.
 
 #### Tests
-- New _compat.mjs (11 checks) and _audit4.mjs (22 checks); both wired into scripts/register.mjs and CI.
+- New tests/compat.mjs (11 checks) and tests/audit-4.mjs (22 checks); both wired into scripts/register.mjs and CI.
 - Full suite: selftest, audit 33, audit2 34, audit3 51, audit4 22, compat 11, render, e2e --cli-only 26, verify-install 13, node --check 13 files.
 
 
@@ -91,7 +91,7 @@ Plugin version bumped to **0.3.0**. package.json gains dsh.compat = { hosts: ">=
 ## v11 — end-to-end verification
 
 ### Added
-- `_e2e.mjs`: 35 checks across every CLI command and every HTTP action, including three error branches.
+- `tests/e2e.mjs`: 35 checks across every CLI command and every HTTP action, including three error branches.
 - Panel screenshots for all seven tabs.
 
 ## v10 — visual layer

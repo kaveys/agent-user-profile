@@ -71,6 +71,11 @@ ok('数据目录已初始化', existsSync(join(DSH, 'user-profile', 'config.json
 const mcpEntry = join(INSTALLED, 'mcp', 'server.mjs')
 ok('MCP server 随包安装', existsSync(mcpEntry), mcpEntry)
 
+// 9b 共享判定层：index.js 会 import 这两个文件，缺了插件直接加载失败
+for (const rel of ['lib/text.mjs', 'lib/relevance.mjs']) {
+  ok(`共享模块随包安装 ${rel}`, existsSync(join(INSTALLED, rel)), join(INSTALLED, rel))
+}
+
 const width = Math.max(...results.map((r) => r.name.length))
 for (const r of results) {
   console.log(`${r.pass ? 'PASS' : 'FAIL'}  ${r.name.padEnd(width)}  ${r.detail}`)
