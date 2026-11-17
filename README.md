@@ -6,7 +6,7 @@
 
 [![tests](docs/badges/tests.svg)](#自测与体检) [![license](docs/badges/license.svg)](LICENSE) [![node](docs/badges/node.svg)](package.json)
 
-**[154 秒中文旁白 · 优势介绍片](docs/video/intro-advantages.mp4)** · [58 秒功能速览](docs/video/intro-60s.mp4) · [无声速览版（39 秒）](docs/video/intro.mp4) · [English README](README.en.md)
+**[面向普通用户的介绍片（72 秒 · 中文配音）](docs/video/agent-user-profile.mp4)** · [字幕](docs/video/agent-user-profile.srt) · [旁白全文](docs/video/agent-user-profile-narration.txt) · [English README](README.en.md)
 
 ## 这是什么
 
