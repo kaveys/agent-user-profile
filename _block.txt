@@ -1,0 +1,128 @@
+/**
+ * ---------------------------------------------------------------- 解释与体检（v20）
+ * 为什么要有 explain：画像是个黑箱时，用户只会问「凭什么这句进了我的画像」。
+ * 这里把「哪些条目会因为本轮这句话被带进来、哪些被相关性挡掉、为什么」摊开。
+ */
+
+/** 与 index.js 的 bigrams 保持同一算法（两处必须一起改，测试会对齐）。 */
+function bigramsOf(text) {
+  const tokens = String(text ?? '')
+    .toLowerCase()
+    .replace(/[^\p{Script=Han}a-z0-9]+/gu, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+  const out = new Set()
+  for (const token of tokens) {
+    if (token.length === 1) out.add(token)
+    for (let i = 0; i + 1 < token.length; i += 1) out.add(token.slice(i, i + 2))
+  }
+  return out
+}
+
+/** 一条条目和查询的相关性：命中二元组数 / 条目二元组总数（0..1）。 */
+function relevanceOf(itemText, query) {
+  const item = bigramsOf(itemText)
+  if (item.size === 0 || query.size === 0) return 0
+  let hit = 0
+  for (const gram of item) if (query.has(gram)) hit += 1
+  return hit / item.size
+}
+
+function cmdExplain({ positional, flags }) {
+  const config = loadConfig()
+  const declarations = readJsonl(p('declarations.jsonl'))
+  const query = bigramsOf(positional.join(' '))
+  const scope = activeScope(flags, config)
+  const scored = declarations
+    .filter((record) => inScope(record, scope))
+    .map((record) => ({
+      id: record.id,
+      dim: record.dim,
+      dimLabel: labelOf(record.dim, config),
+      text: record.fact,
+      weight: Number(record.confidence ?? 0.5),
+      core: Boolean(record.core) || config.inject.coreDimensions.includes(record.dim),
+      partition: partitionOf(record.dim),
+      score: relevanceOf(record.fact, query),
+    }))
+    .sort((a, b) => (b.score - a.score) || (b.weight - a.weight))
+
+  const threshold = Number(config.inject?.relevanceFloor ?? 0.12)
+  const carried = scored.filter((item) => item.core || item.score >= threshold)
+  const dropped = scored.filter((item) => !(item.core || item.score >= threshold))
+
+  const lines = ['# 本次会带入的条目（' + carried.length + '/' + scored.length + '）', '']
+  for (const item of carried.slice(0, 40)) {
+    lines.push('- [' + item.dimLabel + ' ' + item.weight.toFixed(2) + (item.core ? '·核心' : '') + '] 相关度 ' + (item.score * 100).toFixed(0) + '% :: ' + item.text)
+  }
+  if (dropped.length > 0) {
+    lines.push('', '# 被相关性挡掉的条目（' + dropped.length + '）', '')
+    for (const item of dropped.slice(0, 20)) {
+      lines.push('- [' + item.dimLabel + ' ' + item.weight.toFixed(2) + '] 相关度 ' + (item.score * 100).toFixed(0) + '% :: ' + item.text)
+    }
+  }
+  lines.push('', '> 判定：核心/红线维度永远带入；其余相关度 ≥ ' + (threshold * 100).toFixed(0) + '% 才带入，挡掉不等于删除。')
+  process.stdout.write(lines.join('\n') + '\n')
+
+  if (flags.json === true) process.stdout.write(JSON.stringify({ carried, dropped, threshold }, null, 2) + '\n')
+}
+
+/**
+ * 画像健康度：五个会真的影响使用效果的量，每一项都能对应一句「它低了会怎样」。
+ */
+function healthOf(config, declarations, profile) {
+  const items = profile?.items ?? []
+  const declared = declarations.length
+  const states = []
+
+  const ageDays = profile?.generatedAt ? (Date.now() - Date.parse(profile.generatedAt)) / 86400000 : 999
+  const freshness = Math.max(0, Math.min(20, Math.round(20 - ageDays * 2)))
+  states.push({ key: 'freshness', label: '新鲜度', score: freshness, max: 20, note: ageDays > 7 ? '画像超过一周没重建' : '画像是最新的' })
+
+  const dimsUsed = new Set(items.map((item) => item.dim)).size
+  const coverage = Math.min(20, dimsUsed * 2)
+  states.push({ key: 'coverage', label: '覆盖度', score: coverage, max: 20, note: '覆盖 ' + dimsUsed + '/' + config.dimensions.length + ' 个大类' })
+
+  const risky = declarations.filter((record) => blockedPrivacy(record.fact).length > 0).length
+  const modelFacts = declarations.filter((record) => record.provenance?.kind === 'model').length
+  const precision = Math.max(0, 20 - risky * 4)
+  states.push({ key: 'precision', label: '精度', score: Math.round(precision), max: 20, note: risky > 0 ? risky + ' 条含高风险信息' : '没有可疑条目' })
+
+  const conflicts = profile?.conflicts?.length ?? 0
+  const consistency = Math.max(0, 20 - conflicts * 4)
+  states.push({ key: 'consistency', label: '一致性', score: consistency, max: 20, note: conflicts > 0 ? conflicts + ' 条历史冲突' : '没有未解冲突' })
+
+  const coreCount = items.filter((item) => item.core).length
+  const balance = Math.min(20, coreCount * 4)
+  states.push({ key: 'balance', label: '重点明确', score: balance, max: 20, note: coreCount > 0 ? coreCount + ' 条核心条目' : '还没标核心条目' })
+
+  const total = states.reduce((sum, state) => sum + state.score, 0)
+  const advice = []
+  if (freshness < 12) advice.push('跑一次 profile build 让画像跟上最近的对话')
+  if (coverage < 8) advice.push('画像只覆盖少数大类，补充偏好与习惯会更像你')
+  if (balance < 8) advice.push('把最重要的几条标成核心（面板条目页「设核心」）')
+  if (consistency < 16) advice.push('去「冲突与历史」页裁决旧条目')
+  if (advice.length === 0) advice.push('暂无问题，保持现在的节奏即可')
+
+  return { total, states, advice, dimsUsed, coreCount, modelFacts, risky, declared }
+}
+
+function cmdHealth({ flags }) {
+  const config = loadConfig()
+  const declarations = readJsonl(p('declarations.jsonl'))
+  const profile = readJson(p('profile.json'))
+  const health = healthOf(config, declarations, profile)
+  if (flags.json === true) {
+    process.stdout.write(JSON.stringify(health, null, 2) + '\n')
+    return
+  }
+  const lines = ['画像健康度  ' + health.total + '/100', '']
+  for (const state of health.states) {
+    const filled = Math.round((state.score / state.max) * 10)
+    lines.push('  ' + state.label + '  ' + '█'.repeat(filled) + '·'.repeat(10 - filled) + '  ' + state.score + '/' + state.max + '  ' + state.note)
+  }
+  lines.push('', '建议：')
+  for (const item of health.advice) lines.push('  · ' + item)
+  process.stdout.write(lines.join('\n') + '\n')
+}

@@ -31,6 +31,7 @@ jobs:
           node --check _audit2.mjs
           node --check _audit3.mjs
           node --check _audit4.mjs
+          node --check _audit5.mjs
           node --check _compat.mjs
           node --check _render.mjs
 

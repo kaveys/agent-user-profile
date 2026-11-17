@@ -145,6 +145,17 @@ $CLI set enabled false                       # 关掉默认叠加
 $CLI reset --yes                             # 归档清空
 ```
 
+## 查两件事：这次会带入什么、画像健康吗（v20）
+
+```bash
+node bin/profile.mjs explain "界面美化 风格"   # 这条话会带入哪些条目，哪些被相关性挡掉
+node bin/profile.mjs explain "…" --json        # { carried, dropped, threshold }
+node bin/profile.mjs health                    # 五项打分 + 短板建议
+node bin/profile.mjs health --json
+```
+
+`explain` 用的就是注入那一套二元组相关度（`inject.relevanceFloor` 默认 0.12）：核心条目与红线维度永远带入，其余按「这句话被这条条目覆盖了多少」决定，挡掉不等于删除。`health` 五项各 20 分：新鲜度 / 覆盖度 / 精度 / 一致性 / 重点明确，实测 96 分那次扣分来自一条被取代的旧值。
+
 ## 条目凭什么算「有效」（v15）
 
 条数不设上限（`inject.maxChars=0`、`inject.topK=0` 默认就是不限），体积靠**准入闸门**控制，而不是靠事后截断：
@@ -244,6 +255,11 @@ stdio + 行分隔 JSON-RPC 2.0，**stdout 只走协议、日志全走 stderr**�
 两条路由都先过宿主的 `connection.requestRejection` 鉴权闸门；**页面与注入块共用同一套排序**，所以表格第一行就是注入时排第一的那条。
 浏览器侧只 `require('react')`、只用 `--dsw-alias-*` 主题变量着色，亮/暗主题随宿主切换。
 
+### v20 新增两块
+
+- 概览：**画像健康度**卡（总分 + 五项条形 + 首条建议，低于六成转黄）。
+- 备份与重置：**宿主能力**区（六项可用/缺失 + 最近 6 行诊断），没有记录时提示「重启一次 dsh 后会自动写入」。
+
 ### v9 界面与恢复点
 
 - **状态可见**：顶部状态胶囊（已就绪 / 证据还少 / 还是空的 / 未生成）+ 版本行 + 「刷新」「立即更新」；页签数字改成独立小胶囊且吸顶；提示条带语义色边、可手动关闭、8 秒自动消失；加载态是骨架屏，出错是卡片 + 重试；危险操作收进红色区块。
@@ -315,6 +331,7 @@ node _audit.mjs               # 33 项对抗式边界检查（脏输入 / 冲突
 node _audit2.mjs              # 34 项往返与极限（导出→重置→导入 / 坏行 / 坏配置 / 快照上限 / 并发）
 node _audit3.mjs              # 51 项逻辑一致性（预算与排序 / 闸门顺序 / MCP 协议 / 面板自洽）
 node _audit4.mjs              # 22 项兼容层自身（能力文件 / doctor / 别名事件 / 降级不崩 / 旧配置迁移）
+node _audit5.mjs              # 31 项「两处说法不一致」（settings↔set / 计数自洽 / health 语义 / explain 语义）
 node _compat.mjs              # 11 项残缺宿主（只有 ctx.on / 缺 pre-step / 无 ctx.on / 无 next / 旧事件名）
 node _render.mjs             # 面板渲染烟测：7 个页签逐个点 + payload 洁净度
 node scripts/verify-install.mjs   # 13 项安装体检（不重启、不起 dsh）

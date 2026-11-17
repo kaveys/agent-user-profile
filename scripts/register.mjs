@@ -33,7 +33,7 @@ const SYNC = [
   '_audit.mjs',
   '_audit2.mjs',
   '_audit3.mjs',
-  '_audit4.mjs',
+  '_audit4.mjs', '_audit5.mjs', 'docs/CHANGES-v20.md',
   '_compat.mjs',
   'docs/COMPATIBILITY.md',
   'docs/CHANGES-v19.md',

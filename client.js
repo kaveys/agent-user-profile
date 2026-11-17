@@ -44,7 +44,10 @@ window.__ModuleLoader__.load({
 
     const mono = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
 
-    const styles = {
+      const styles = {
+        healthHead: { display: 'flex', alignItems: 'baseline', gap: '6px', marginBottom: '10px' },
+        healthScore: { fontSize: '24px', fontWeight: 600, color: T.label1, fontVariantNumeric: 'tabular-nums' },
+        diagBox: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '11.5px', color: T.label2, background: T.layer2, border: `1px solid ${T.border1}`, borderRadius: '8px', padding: '10px 12px', whiteSpace: 'pre-wrap', marginTop: '8px' },
       wrap: { display: 'flex', flexDirection: 'column', gap: '24px', padding: '30px 0 48px', color: T.label1 },
       head: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' },
       title: { fontSize: '17px', fontWeight: 600, letterSpacing: '-0.01em', margin: 0, color: T.label1 },
@@ -465,6 +468,16 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.note },
               '还没有可以依据的条目。三种方式让它长起来：在「条目」页手动记一条；聊几轮后由插件自动提炼（低置信的先进「待审」）；或在「备份与重置」里导入历史备份。'))
           : null,
+        data.health === undefined || data.health === null
+          ? null
+          : h(Section, { title: '画像健康度', extra: h('span', { style: styles.meta }, data.health.advice?.[0] ?? '') },
+            h('div', { style: styles.healthHead },
+              h('span', { style: styles.healthScore }, String(data.health.total)),
+              h('span', { style: styles.meta }, '/ 100')),
+            (data.health.states ?? []).map((state) => h('div', { key: state.key, style: { ...styles.dimRow, gridTemplateColumns: '64px 1fr 44px' } },
+              h('span', { style: styles.meta }, state.label),
+              h(Bar, { ratio: state.max === 0 ? 0 : state.score / state.max, tone: state.score < state.max * 0.6 ? 'warn' : undefined }),
+              h('span', { style: { ...styles.meta, textAlign: 'right', fontVariantNumeric: 'tabular-nums' } }, String(state.score))))),
         countedDims.length === 0
           ? null
           : h(Section, { title: '画像分布', extra: h('span', { style: styles.meta }, `${countedDims.length} 个大类有条目`) },
@@ -907,7 +920,32 @@ window.__ModuleLoader__.load({
     const [encBackup, setEncBackup] = React.useState(false)
       const snapshots = Array.isArray(data.snapshots) ? data.snapshots : []
       const visibleSnaps = showAllSnaps ? snapshots : snapshots.slice(0, 5)
+      const host = data.host ?? {}
+      const caps = host.caps
+      const capRows = caps === undefined || caps === null ? [] : [
+        ['采集（会话事件）', caps.sessionEvents],
+        ['注入（每轮前置）', caps.preStep],
+        ['面板路由', caps.webServer],
+        ['面板鉴权', caps.connection],
+        ['智能提取（模型）', caps.llm],
+        ['模块加载', caps.loader],
+      ]
       return h('div', { style: styles.wrap },
+        h(Section, {
+          title: '宿主能力',
+          extra: h('span', { style: styles.meta }, caps === undefined || caps === null ? '还没有记录' : `记录于 ${relTime(caps.at)} · node ${caps.node ?? '?'}`),
+        },
+          caps === undefined || caps === null
+            ? h('div', { style: styles.note }, '这台宿主还没写过能力记录。重启一次 dsh 后会自动写入，之后这里会显示采集、注入、面板各自能不能用；缺哪一项就只会少那个功能，不会影响其余部分。')
+            : h('div', null,
+              capRows.map(([label, ok]) => h('div', { key: label, style: { ...styles.dimRow, gridTemplateColumns: '1fr 56px' } },
+                h('span', { style: { fontSize: '12.5px' } }, label),
+                h('span', { style: { ...styles.meta, textAlign: 'right', color: ok === true ? T.success : T.warn } }, ok === true ? '可用' : '缺失'))),
+              (host.diagTail ?? []).length === 0
+                ? null
+                : h('div', null,
+                  h('div', { style: { ...styles.meta, marginTop: '10px' } }, '最近诊断（排障时贴给维护者）'),
+                  h('div', { style: styles.diagBox }, (host.diagTail ?? []).join('\n'))))),
         h(Section, {
           title: '恢复点',
           extra: h('span', { style: styles.note }, '每次删除前自动留一份，最多 20 份'),

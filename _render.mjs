@@ -251,6 +251,8 @@ check('条目页有权重加减按钮', itemText.includes('＋') && itemText.inc
 check('条目页显示权重等级（高/中/低）', /高|中|低/.test(itemText))
 // 溯源：条目副行要说清「这条是谁说的、什么时候」的形态（数据里有 provenance 才显示）
 check('条目页副行保留更新时间', itemText.includes('更新于'), itemText.slice(0, 80))
+check('概览有画像健康度', /画像健康度/.test(seen['概览'] ?? ''), '健康度卡应出现在概览')
+check('备份页有宿主能力区', /宿主能力/.test(seen['备份与重置'] ?? ''), '宿主能力应出现在备份与重置')
 check('备份页有体检 / 脱敏 / 备份三组入口', /体检条目/.test(seen['备份与重置'] ?? '') && /脱敏/.test(seen['备份与重置'] ?? '') && /WebDAV/.test(seen['备份与重置'] ?? ''))
 
 process.stdout.write(failures === 0 ? '\n渲染烟测全部通过\n' : `\n渲染烟测失败 ${failures} 项\n`)

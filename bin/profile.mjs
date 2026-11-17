@@ -1400,6 +1400,166 @@ function cmdShow({ flags }) {
   process.stdout.write(readFileSync(p('profile.md'), 'utf8'))
 }
 
+/**
+ * ---------------------------------------------------------------- 解释与体检（v20）
+ * 为什么要有 explain：画像是个黑箱时，用户只会问「凭什么这句进了我的画像」。
+ * 这里把「哪些条目会因为本轮这句话被带进来、哪些被相关性挡掉、为什么」摊开。
+ */
+
+/** 与 index.js 的 bigrams 保持同一算法（两处必须一起改，测试会对齐）。 */
+function bigramsOf(text) {
+  const tokens = String(text ?? '')
+    .toLowerCase()
+    .replace(/[^\p{Script=Han}a-z0-9]+/gu, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+  const out = new Set()
+  for (const token of tokens) {
+    if (token.length === 1) out.add(token)
+    for (let i = 0; i + 1 < token.length; i += 1) out.add(token.slice(i, i + 2))
+  }
+  return out
+}
+
+/** 一条条目和查询的相关性：命中二元组数 / 条目二元组总数（0..1）。 */
+// 相关度 = 命中的查询二元组 / 查询二元组总数。
+// 分母用查询而不是条目：条目越长越吃亏的写法会让「用户要求界面像成熟产品，有层次有留白…」
+// 这种本来就该命中的长条目算成 4%，与实际注入行为不一致（注入只要有一个二元组就留）。
+function relevanceOf(itemText, query) {
+  const item = bigramsOf(itemText)
+  if (item.size === 0 || query.size === 0) return 0
+  let hit = 0
+  for (const gram of query) if (item.has(gram)) hit += 1
+  return hit / query.size
+}
+
+function cmdExplain({ positional, flags }) {
+  const config = loadConfig()
+  const declarations = readJsonl(p('declarations.jsonl'))
+  const query = bigramsOf(positional.join(' '))
+  const scope = activeScope(flags, config)
+  const scored = declarations
+    .filter((record) => inScope(record, scope))
+    .map((record) => ({
+      id: record.id,
+      dim: record.dim,
+      dimLabel: labelOf(record.dim, config),
+      text: record.fact,
+      weight: Number(record.confidence ?? 0.5),
+      core: record.core === true,
+      redline: config.inject.coreDimensions.includes(record.dim),
+      partition: partitionOf(record.dim),
+      score: relevanceOf(record.fact, query),
+    }))
+    .sort((a, b) => (b.score - a.score) || (b.weight - a.weight))
+
+  const threshold = Number(config.inject?.relevanceFloor ?? 0.12)
+  const carried = scored.filter((item) => item.core || item.redline || item.score >= threshold)
+  const dropped = scored.filter((item) => !(item.core || item.redline || item.score >= threshold))
+
+  const why = (item) => {
+    if (item.score > 0) return '相关度 ' + (item.score * 100).toFixed(0) + '%'
+    if (item.core) return '核心条目，永远带入'
+    if (item.redline) return '红线维度，永远带入'
+    return '相关度 0%'
+  }
+  const lines = ['# 本次会带入的条目（' + carried.length + '/' + scored.length + '）', '']
+  for (const item of carried.slice(0, 40)) {
+    const mark = item.core ? '·核心' : item.redline ? '·红线' : ''
+    lines.push('- [' + item.dimLabel + ' ' + item.weight.toFixed(2) + mark + '] ' + why(item) + ' :: ' + item.text)
+  }
+  if (dropped.length > 0) {
+    lines.push('', '# 被相关性挡掉的条目（' + dropped.length + '）', '')
+    for (const item of dropped.slice(0, 20)) {
+      lines.push('- [' + item.dimLabel + ' ' + item.weight.toFixed(2) + '] 相关度 ' + (item.score * 100).toFixed(0) + '% :: ' + item.text)
+    }
+  }
+  lines.push('', '> 判定：核心/红线维度永远带入；其余相关度 ≥ ' + (threshold * 100).toFixed(0) + '% 才带入，挡掉不等于删除。')
+  if (flags.json === true) {
+    process.stdout.write(JSON.stringify({ carried, dropped, threshold }, null, 2) + '\n')
+    return
+  }
+  process.stdout.write(lines.join('\n') + '\n')
+}
+
+/**
+ * 画像健康度：五个会真的影响使用效果的量，每一项都能对应一句「它低了会怎样」。
+ */
+function healthOf(config, declarations, profile) {
+  const items = profile === undefined || profile === null ? [] : flatten(profile, config)
+  const declared = declarations.length
+  const states = []
+
+  const stampSource = profile?.builtAt ?? profile?.generatedAt
+  let stamp = stampSource ? Date.parse(stampSource) : NaN
+  if (!Number.isFinite(stamp)) {
+    try { stamp = statSync(p('profile.json')).mtimeMs } catch { stamp = NaN }
+  }
+  const ageDays = Number.isFinite(stamp) ? (Date.now() - stamp) / 86400000 : 999
+  const freshness = Math.max(0, Math.min(20, Math.round(20 - ageDays * 2)))
+  states.push({ key: 'freshness', label: '新鲜度', score: freshness, max: 20, note: ageDays > 7 ? '画像超过一周没重建' : '画像是最新的' })
+
+  const dimsUsed = new Set(items.map((item) => item.dim)).size
+  const coverage = Math.min(20, dimsUsed * 2)
+  states.push({ key: 'coverage', label: '覆盖度', score: coverage, max: 20, note: '覆盖 ' + dimsUsed + '/' + config.dimensions.length + ' 个大类' })
+
+  const risky = declarations.filter((record) => blockedPrivacy(record.fact).length > 0).length
+  const modelFacts = declarations.filter((record) => record.provenance?.kind === 'model').length
+  const precision = Math.max(0, 20 - risky * 4)
+  states.push({ key: 'precision', label: '精度', score: Math.round(precision), max: 20, note: risky > 0 ? risky + ' 条含高风险信息' : '没有可疑条目' })
+
+  const conflicts = profile?.conflicts?.length ?? 0
+  const consistency = Math.max(0, 20 - conflicts * 4)
+  states.push({ key: 'consistency', label: '一致性', score: consistency, max: 20, note: conflicts > 0 ? conflicts + ' 条历史冲突' : '没有未解冲突' })
+
+  const coreCount = items.filter((item) => item.core).length
+  const balance = Math.min(20, coreCount * 4)
+  states.push({ key: 'balance', label: '重点明确', score: balance, max: 20, note: coreCount > 0 ? coreCount + ' 条核心条目' : '还没标核心条目' })
+
+  const total = states.reduce((sum, state) => sum + state.score, 0)
+  const advice = []
+  if (freshness < 12) advice.push('跑一次 profile build 让画像跟上最近的对话')
+  if (coverage < 8) advice.push('画像只覆盖少数大类，补充偏好与习惯会更像你')
+  if (balance < 8) advice.push('把最重要的几条标成核心（面板条目页「设核心」）')
+  if (consistency < 16) advice.push('去「冲突与历史」页裁决旧条目')
+  if (advice.length === 0) advice.push('暂无问题，保持现在的节奏即可')
+
+  return { total, states, advice, dimsUsed, coreCount, modelFacts, risky, declared }
+}
+
+function cmdHealth({ flags }) {
+  const config = loadConfig()
+  const declarations = readJsonl(p('declarations.jsonl'))
+  const profile = readJson(p('profile.json'))
+  const health = healthOf(config, declarations, profile)
+  if (flags.json === true) {
+    process.stdout.write(JSON.stringify(health, null, 2) + '\n')
+    return
+  }
+  const lines = ['画像健康度  ' + health.total + '/100', '']
+  for (const state of health.states) {
+    const filled = Math.round((state.score / state.max) * 10)
+    lines.push('  ' + state.label + '  ' + '█'.repeat(filled) + '·'.repeat(10 - filled) + '  ' + state.score + '/' + state.max + '  ' + state.note)
+  }
+  lines.push('', '建议：')
+  for (const item of health.advice) lines.push('  · ' + item)
+  process.stdout.write(lines.join('\n') + '\n')
+}
+
+function readHostInfo() {
+  const capsPath = p('.host.json')
+  let caps
+  try { caps = JSON.parse(readFileSync(capsPath, 'utf8')) } catch { caps = undefined }
+  const diagPath = p('diag.log')
+  let diagTail = []
+  try {
+    const lines = readFileSync(diagPath, 'utf8').trimEnd().split('\n')
+    diagTail = lines.slice(-6).map((line) => line.replace(/^\S+Z\s+\[\d+\]\s*/, ''))
+  } catch { diagTail = [] }
+  return { caps, diagTail, capsPath }
+}
+
 function cmdPanel() {
   const config = loadConfig()
   const profile = readJson(p('profile.json'), undefined)
@@ -1464,6 +1624,8 @@ function cmdPanel() {
       },
     live: liveStats,
     drift,
+    redactionInfo: { patternCount: (config.redaction.patterns ?? []).length, presets: config.redaction.presets ?? [] },
+    health: healthOf(config, readJsonl(p("declarations.jsonl")), profile),
     items: items.map((item, index) => ({
       rank: index + 1,
       partition: partitionOf(item.dim),
@@ -1574,7 +1736,7 @@ function cmdPanel() {
         timeoutMs: config.extract?.timeoutMs ?? 45000,
       },
       capture: { turnText: config.capture?.turnText !== false },
-      redaction: { mode: config.redaction.mode, patternCount: (config.redaction.patterns ?? []).length },
+      redaction: { mode: config.redaction.mode, presets: config.redaction.presets ?? [] },
       // 面板只能看到配置里「要不要传、传到哪」，密码永远不从这里出来。
       backup: {
         webdav: {
@@ -1599,7 +1761,7 @@ function cmdPanel() {
       conflictStats,
       history: historyItems.length,
     },
-    history: historyItems.slice(0, 30),
+    historyItems: historyItems.slice(0, 30),
     // 三类分区汇总（流程第 3 步）：一眼看出「身份/偏好/社交」各有多少条。
     partitions: PARTITIONS.map((p) => ({
       id: p.id,
@@ -1608,6 +1770,8 @@ function cmdPanel() {
     })),
     // 快照列表：面板的「恢复」需要知道有哪些可回退点。
     snapshots: listSnapshots(12),
+    // 宿主能力与最近诊断：排障时不用再让用户去翻文件。
+    host: readHostInfo(),
   }
   process.stdout.write(`${JSON.stringify(enriched)}\n`)
 }
@@ -2666,6 +2830,8 @@ const COMMANDS = {
   reset: cmdReset,
   export: cmdExport,
   validate: cmdValidate,
+  explain: cmdExplain,
+  health: cmdHealth,
   redact: cmdRedact,
   backup: cmdBackup,
   unseal: cmdUnseal,
