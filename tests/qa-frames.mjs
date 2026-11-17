@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 
 const dir = process.argv[2] ?? 'scripts/trailer-build'
-const ff = 'C:\\Users\\dev\\AppData\\Local\\Programs\\ffmpeg\\bin\\ffmpeg.exe'
+const ff = process.env.FFMPEG || 'ffmpeg'
 const SW = 480, SH = 270 // 缩略分辨率：1/4 采样，够看边距，raw 只有 380KB
 const SX = 4, SY = 4
 const W = SW, H = SH

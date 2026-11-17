@@ -16,7 +16,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Speech
 
-$Ffmpeg  = if ($env:FFMPEG) { $env:FFMPEG } else { '<home>\AppData\Local\Programs\ffmpeg\bin\ffmpeg.exe' }
+$Ffmpeg  = if ($env:FFMPEG) { $env:FFMPEG } else { 'ffmpeg.exe' }
 $Ffprobe = Join-Path (Split-Path $Ffmpeg) 'ffprobe.exe'
 $Root    = Split-Path -Parent $PSScriptRoot
 $Work    = Join-Path $PSScriptRoot 'trailer-build'

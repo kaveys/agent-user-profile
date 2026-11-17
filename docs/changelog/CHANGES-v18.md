@@ -59,7 +59,7 @@
 
 `_sessions.mjs` 与 `scripts/build-video.ps1` 里写着带用户名的绝对路径（工作区桶名、ffmpeg 安装路径）。
 前者改成「省略参数时自动挑会话最多的那个桶」，后者改成 `$env:FFMPEG` 或 PATH 查找。
-仓库里现在 `grep -r dev` 为 0。
+仓库里现在搜不到用户名与本地路径。
 
 
 ## 验证
