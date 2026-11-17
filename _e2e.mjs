@@ -347,6 +347,29 @@ const baseline = existsSync(join(HOME_DIR, 'declarations.jsonl'))
   : 0
 const marker = `e2e-${Date.now()}`
 
+// B 段打的是真实运行中的宿主，动作会落到真实画像上（改配置、加条目、重建）。
+// 早前就吃过一次亏：`set inject.maxChars 1600` 留在真实配置里，用户看到的注入块被悄悄截断，
+// 而测试报告是「42/42 通过」。所以这里先留快照，退出时（含异常/中断）无条件还原再重建。
+const REAL_FILES = ['config.json', 'declarations.jsonl', 'pending.jsonl']
+const realSnapshot = new Map()
+for (const name of REAL_FILES) {
+  const file = join(HOME_DIR, name)
+  if (existsSync(file)) realSnapshot.set(name, readFileSync(file))
+}
+let restored = false
+process.on('exit', () => {
+  if (restored) return
+  restored = true
+  try {
+    for (const [name, bytes] of realSnapshot) writeFileSync(join(HOME_DIR, name), bytes)
+    spawnSync(NODE, [CLI, 'build', '--all-scopes'], { stdio: 'ignore', timeout: 60000 })
+    process.stdout.write('\n（已把 config / declarations / pending 还原成自检前的样子，并重建画像）\n')
+  } catch (error) {
+    process.stdout.write(`\n还原真实画像失败：${error?.message ?? error}\n`)
+  }
+})
+process.stdout.write('\n[B 段] 会临时改动真实画像，结束时自动还原\n')
+
 const checks = []
 async function at(name, fn) {
   try {
