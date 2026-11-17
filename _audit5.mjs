@@ -130,7 +130,8 @@ const carried = explain.data?.carried ?? []
 const dropped = explain.data?.dropped ?? []
 check('D2 带入 + 挡掉 = 全部条目', carried.length + dropped.length === items.length, `${carried.length}+${dropped.length} vs ${items.length}`)
 check('D3 相关的条目真的被带进来（界面/审美）', carried.some((item) => item.dim === 'taste'))
-check('D4 无关条目被挡掉（技能栈）', dropped.some((item) => item.dim === 'skills'))
+const filledIds = new Set((explain.data?.filled ?? []).map((item) => item.id))
+check('D4 无关条目不会当成命中（技能栈：挡掉或标为保底带入）', !carried.some((item) => item.dim === 'skills' && !filledIds.has(item.id)), `carried=${carried.map((i) => i.dim).join(',')} filled=${[...filledIds].length}`)
 check('D5 红线维度即使无关也带入', carried.some((item) => item.redline === true))
 const textExplain = run(['explain', '界面 风格']).out
 check('D6 文本版讲清了判定规则', textExplain.includes('挡掉不等于删除'))

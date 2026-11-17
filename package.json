@@ -1,6 +1,6 @@
 {
   "name": "dsh-user-profile",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "type": "module",
   "description": "Agent user-profile layer: distill durable preferences into a weighted portrait, overlay it on every task, and let the user opt out for a single turn.",
@@ -40,6 +40,7 @@
     "docs/COMPATIBILITY.md",
     "docs/POSITIONING.md",
     "index.js",
+    "lib",
     "mcp/server.mjs"
   ],
   "exports": {

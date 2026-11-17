@@ -28,6 +28,10 @@ import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto'
 
+// 判定数学只有一份（lib/text.mjs）：CLI 与宿主插件共用，改一处不会漏另一处。
+import { normText, coverage, similarScore, mergeScore } from '../lib/text.mjs'
+import { decideCarried, floorFor } from '../lib/relevance.mjs'
+
 const HOME = process.env.DSH_USER_PROFILE_HOME || join(homedir(), '.dsh', 'user-profile')
 const p = (...parts) => join(HOME, ...parts)
 
@@ -1274,91 +1278,6 @@ function aggregateObserved(records, config) {
   return { items: withItems ? items : [], turns, steps, ok, fail, totalToolCalls }
 }
 
-/** 归一化：只留中英文与数字，压掉标点空白，用于判重。 */
-const normText = (text) => String(text ?? '').toLowerCase().replace(/[\s\p{P}\p{S}]/gu, '')
-
-/** 字符二元组 Dice 系数：0 完全不同，1 完全相同。中文按字切片足够用。 */
-function similarity(a, b) {
-  const x = normText(a)
-  const y = normText(b)
-  if (x.length === 0 || y.length === 0) return 0
-  if (x === y) return 1
-  const grams = (s) => {
-    if (s.length === 1) return [s]
-    const out = []
-    for (let i = 0; i < s.length - 1; i += 1) out.push(s.slice(i, i + 2))
-    return out
-  }
-  const gx = grams(x)
-  const pool = new Map()
-  for (const g of grams(y)) pool.set(g, (pool.get(g) ?? 0) + 1)
-  let hit = 0
-  for (const g of gx) {
-    const n = pool.get(g) ?? 0
-    if (n > 0) {
-      hit += 1
-      pool.set(g, n - 1)
-    }
-  }
-  return (2 * hit) / (gx.length + grams(y).length)
-}
-
-/**
- * 覆盖率：短的那条有多少被长的那条「讲到了」。
- * Dice 对长度差敏感（短句套在长句里也只得 0.4），而「一句话被另一句整体包含」恰恰是最该合并的情形。
- */
-function coverage(a, b) {
-  const x = normText(a)
-  const y = normText(b)
-  if (x.length === 0 || y.length === 0) return 0
-  if (x === y) return 1
-  const [short, long] = x.length <= y.length ? [x, y] : [y, x]
-  if (short.length < 4) return 0 // 太短的句子字面容易撞，交给 similarity
-  const grams = (s) => {
-    const out = []
-    for (let i = 0; i < s.length - 1; i += 1) out.push(s.slice(i, i + 2))
-    return out
-  }
-  const pool = new Map()
-  for (const g of grams(long)) pool.set(g, (pool.get(g) ?? 0) + 1)
-  const gs = grams(short)
-  let hit = 0
-  for (const g of gs) {
-    const n = pool.get(g) ?? 0
-    if (n > 0) {
-      hit += 1
-      pool.set(g, n - 1)
-    }
-  }
-  return gs.length === 0 ? 0 : hit / gs.length
-}
-
-/** 合并判定统一用它：字面相似或「被整体包含」都算同义。 */
-function similarScore(a, b) {
-  return Math.max(similarity(a, b), coverage(a, b))
-}
-
-/**
- * 去掉主语与情态词后再比一次：「用户要求界面简洁」和「界面要简洁」是同一件事，
- * 但字面 Dice 只有 0.4 左右 —— 中文短句里主语占的比重大，不剥掉永远判不相似。
- */
-const SUBJECT_PREFIX = /^(?:用户|我|本人|该用户|对方)(?:要求|希望|想要|需要|习惯|喜欢|是|在|的|会)?/gu
-const stemText = (text) => normText(text).replace(SUBJECT_PREFIX, '')
-
-/** 综合判定：原句相似 / 一方被另一方包含 / 去主语后相似，取最大。 */
-function mergeScore(a, b) {
-  // 数字是有意义的信息（班级、年份、版本、数量）：两句只有数字不同就不再算同义。
-  // 否则「并发写入第 1 条」和「第 2 条」、「262 班」和「263 班」会被并成一条。
-  const nums = (text) => (String(text ?? '').match(/\d+/g) ?? []).sort().join(',')
-  if (nums(a) !== nums(b) && (nums(a).length > 0 || nums(b).length > 0)) return 0
-  const direct = similarScore(a, b)
-  if (direct >= 1) return 1
-  const stemA = stemText(a)
-  const stemB = stemText(b)
-  if (stemA.length < 4 || stemB.length < 4) return direct
-  return Math.max(direct, similarScore(stemA, stemB))
-}
-
 /**
  * 主动合并相似条目：同一大类内按 mergeScore 判定，跨大类只在字面几乎相同（≥0.8）时合并，
  * 避免把「习惯」和「口味」里措辞相近但含义不同的两条搅在一起。
@@ -1828,65 +1747,37 @@ function cmdShow({ flags }) {
  * 这里把「哪些条目会因为本轮这句话被带进来、哪些被相关性挡掉、为什么」摊开。
  */
 
-/** 与 index.js 的 bigrams 保持同一算法（两处必须一起改，测试会对齐）。 */
-function bigramsOf(text) {
-  const tokens = String(text ?? '')
-    .toLowerCase()
-    .replace(/[^\p{Script=Han}a-z0-9]+/gu, ' ')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-  const out = new Set()
-  for (const token of tokens) {
-    if (token.length === 1) out.add(token)
-    for (let i = 0; i + 1 < token.length; i += 1) out.add(token.slice(i, i + 2))
-  }
-  return out
-}
-
-/** 一条条目和查询的相关性：命中二元组数 / 条目二元组总数（0..1）。 */
-// 相关度 = 命中的查询二元组 / 查询二元组总数。
-// 分母用查询而不是条目：条目越长越吃亏的写法会让「用户要求界面像成熟产品，有层次有留白…」
-// 这种本来就该命中的长条目算成 4%，与实际注入行为不一致（注入只要有一个二元组就留）。
-function relevanceOf(itemText, query) {
-  const item = bigramsOf(itemText)
-  if (item.size === 0 || query.size === 0) return 0
-  let hit = 0
-  for (const gram of query) if (item.has(gram)) hit += 1
-  return hit / query.size
-}
 
 function cmdExplain({ positional, flags }) {
   const config = loadConfig()
-  const declarations = readJsonl(p('declarations.jsonl'))
-  const query = bigramsOf(positional.join(' '))
   const scope = activeScope(flags, config)
-  const scored = declarations
-    .filter((record) => inScope(record, scope))
-    .map((record) => ({
-      id: record.id,
-      dim: record.dim,
-      dimLabel: labelOf(record.dim, config),
-      text: record.fact,
-      weight: Number(record.confidence ?? 0.5),
-      core: record.core === true,
-      redline: config.inject.coreDimensions.includes(record.dim),
-      partition: partitionOf(record.dim),
-      score: relevanceOf(record.fact, query),
-    }))
-    .sort((a, b) => (b.score - a.score) || (b.weight - a.weight))
-
-  const threshold = Number(config.inject?.relevanceFloor ?? 0.12)
-  const carried = scored.filter((item) => item.core || item.redline || item.score >= threshold)
-  const dropped = scored.filter((item) => !(item.core || item.redline || item.score >= threshold))
+  const declarations = readJsonl(p('declarations.jsonl')).filter((record) => inScope(record, scope))
+  // 判定只有一份：与宿主注入共用 lib/relevance.mjs 的 decideCarried。
+  const items = declarations.map((record) => ({
+    id: record.id,
+    dim: record.dim,
+    dimLabel: labelOf(record.dim, config),
+    text: record.fact,
+    weight: Number(record.confidence ?? 0.5),
+    core: record.core === true,
+    // 核心条目在注入里落在红线段，两者都是「永远带入」。
+    redline: record.core === true || config.inject.coreDimensions.includes(record.dim),
+    partition: partitionOf(record.dim),
+  }))
+  const verdict = decideCarried(items, positional.join(' '), { minKeep: config.inject?.minKeep })
+  const filledSet = new Set(verdict.filled)
+  const carried = items
+    .filter((item) => verdict.carried.includes(item))
+    .sort((a, b) => (b.weight - a.weight) || String(a.text).localeCompare(String(b.text)))
+  const dropped = verdict.dropped
 
   const why = (item) => {
-    if (item.score > 0) return '相关度 ' + (item.score * 100).toFixed(0) + '%'
     if (item.core) return '核心条目，永远带入'
     if (item.redline) return '红线维度，永远带入'
-    return '相关度 0%'
+    if (filledSet.has(item)) return '保底带入（字面不相关，按权重补足）'
+    return '命中本轮片段'
   }
-  const lines = ['# 本次会带入的条目（' + carried.length + '/' + scored.length + '）', '']
+  const lines = ['# 本次会带入的条目（' + carried.length + '/' + items.length + '）', '']
   for (const item of carried.slice(0, 40)) {
     const mark = item.core ? '·核心' : item.redline ? '·红线' : ''
     lines.push('- [' + item.dimLabel + ' ' + item.weight.toFixed(2) + mark + '] ' + why(item) + ' :: ' + item.text)
@@ -1894,12 +1785,12 @@ function cmdExplain({ positional, flags }) {
   if (dropped.length > 0) {
     lines.push('', '# 被相关性挡掉的条目（' + dropped.length + '）', '')
     for (const item of dropped.slice(0, 20)) {
-      lines.push('- [' + item.dimLabel + ' ' + item.weight.toFixed(2) + '] 相关度 ' + (item.score * 100).toFixed(0) + '% :: ' + item.text)
+      lines.push('- [' + item.dimLabel + ' ' + item.weight.toFixed(2) + '] 未命中本轮片段 :: ' + item.text)
     }
   }
-  lines.push('', '> 判定：核心/红线维度永远带入；其余相关度 ≥ ' + (threshold * 100).toFixed(0) + '% 才带入，挡掉不等于删除。')
+  lines.push('', '> 判定：核心/红线永远带入；其余本轮命中任一片段即带入，不足 ' + floorFor(items.length, config.inject?.minKeep) + ' 条时按权重补足。挡掉不等于删除。')
   if (flags.json === true) {
-    process.stdout.write(JSON.stringify({ carried, dropped, threshold }, null, 2) + '\n')
+    process.stdout.write(JSON.stringify({ carried, filled: verdict.filled, dropped, floor: verdict.floor, minKeep: config.inject?.minKeep ?? null }, null, 2) + '\n')
     return
   }
   process.stdout.write(lines.join('\n') + '\n')
@@ -2456,6 +2347,11 @@ function cmdDedupe({ flags }) {
   const config = loadConfig()
   const records = readJsonl(p('declarations.jsonl')).filter((r) => typeof r?.fact === 'string' && r.fact.length > 0)
   if (records.length < 2) {
+    // --pairs 是机器可读契约：空库也要给合法 JSON，调用方不该为「没东西」写特例。
+    if (flags.pairs === true) {
+      process.stdout.write(JSON.stringify({ count: 0, pairs: [] }, null, 2) + '\n')
+      return
+    }
     process.stdout.write(`只有 ${records.length} 条声明，没什么可合并的\n`)
     return
   }
