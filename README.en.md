@@ -1,116 +1,104 @@
 # agent-user-profile
 
-**The user-profile layer for coding agents.** Distill the preferences, habits, skills and red lines scattered across conversations into one durable, weighted portrait — then overlay it on every task by default, and skip it the moment the user says so.
+**A "manual about you" for AI assistants.**
 
-> Current implementation is a DeepSeek Harness (DSH) plugin. The core — portrait schema, admission gate, three-section injection, snapshot rollback — is host-agnostic and the CLI runs on its own.
+Every new chat starts the same way: you re-explain yourself — I'm a student, I like clean interfaces, don't touch my project folder, give me the conclusion first.
+This plugin writes those things down, keeps them in one clear list, and puts that list in front of the assistant before every task. You don't have to repeat yourself.
 
-[![tests](docs/badges/tests.svg)](#tests) [![license](docs/badges/license.svg)](LICENSE) [![node](docs/badges/node.svg)](#requirements)
+If you don't want it for a turn, say "don't use my profile this time" — it steps aside and tells you so.
 
-**[For end users: 72-second narrated walkthrough (Chinese)](docs/video/agent-user-profile.mp4)** · [subtitles](docs/video/agent-user-profile.srt) · [transcript](docs/video/agent-user-profile-narration.txt) · [中文 README](README.md)
+**[72-second intro (Chinese narration)](docs/video/agent-user-profile.mp4)** · [中文 README](README.md)
 
----
+![Overview](docs/screenshots/01-overview.png)
 
-## What it is
+## Why it exists
 
-A portrait is **not** a chat log and **not** a memory search index. It is a small, curated set of statements about *one* person, each with a weight, a source and an audit trail.
+| Before | After |
+|---|---|
+| Re-introduce yourself in every new chat | It already knows, and starts in your style |
+| Preferences fade after a few days | They live in a list you can edit and re-weight |
+| It occasionally picks a style you dislike | The list says "clean, no flashy animation" and it follows |
+| Worried the AI hoards your private details | Only conclusions are stored; raw chat never hits disk; ID numbers and passwords are refused |
 
-Every task starts with three things:
+## What it remembers
 
-1. a fixed policy block that lives in the plugin (priority order, when the portrait is primary evidence, when to skip it);
-2. the portrait data, split into **red lines / personalization preferences / background**;
-3. an explicit opt-out: if the user says "don't use the profile this time", the data is dropped for that turn and the result says so.
+Four kinds, all of them "still true in a different task":
 
-## What it is not
+| Kind | Examples |
+|---|---|
+| **Who you are** | Undergraduate in UAV systems engineering; writes in Chinese |
+| **What you like** | Clean layouts with whitespace; cool colour palette; no exclamation marks |
+| **How you work** | Conclusion first, then reasoning; show evidence; make it actually run |
+| **What you never want** | Don't touch my project files; don't delete anything unasked; redact before publishing |
 
-| Not this | Because |
-| --- | --- |
-| A vector database | Portrait entries are claims, not documents. Weights and conflicts matter more than recall. |
-| A transcript summarizer | Summaries go stale silently. Every entry is addressable: edit, merge, forget, restore. |
-| A prompt-injection machine | Profile text is background knowledge, never an instruction. Red lines are the only exception, and even they lose to explicit in-turn instructions. |
-| A telemetry dashboard | The panel only shows things about *you*. Tool-call statistics stay out of it by default. |
+Every entry can be edited, re-weighted, marked as a hard rule, or deleted — and deletions are undoable from the built-in snapshots.
 
-## Three things other memory plugins don't do
+## What it refuses to remember
 
-| | |
-| --- | --- |
-| **Per-turn opt-out** | "Don't use my profile" is understood, honoured, and acknowledged in the answer — no plugin-wide switch, no settings diving. |
-| **Snapshot rollback** | Every destructive write takes a snapshot first (`snapshots/declarations-*.jsonl`, capped at 20). One command — or one click on *Restore points* — puts it back. |
-| **Policy separated from data** | How the portrait is used lives in code and cannot be edited or deleted from the portrait. Reset the data and the rules still apply. |
+- ID cards, bank cards, passwords, home addresses — refused outright, not masked.
+- Details of the current task: file names, paths, ports, versions, stack traces, one-off requests.
+- Raw conversation — the disk holds a list of conclusions only.
+- Project-local preferences — they never leak into your general profile.
 
-## Six-step memory pipeline (v17)
+## Getting started
 
-Recording is gated at every step, and each gate can be switched off on its own.
-
-| Step | What happens | Default |
-| --- | --- | --- |
-| 1 Trigger | A turn is only mined when the user talks about *themselves*; translation, homework and "why does this error" turns are skipped | `extract.skipEphemeralTurns: true` |
-| 2 Extract & normalise | Structured `{dim, key, fact, confidence, scope}` records only — transcripts are never written to disk. Near-duplicates merge; the loser goes to history | `build.dedupe: true` |
-| 3 Conflicts & partitions | Contradictions follow `newest` / `freeze`; the ten dimensions roll up into `user_profile` / `user_preference` / `user_social_network` | `conflicts.strategy: newest` |
-| 4 Encryption | Backup packages are encrypted on upload (AES-256-GCM); `backup --out --encrypt` too, and `profile unseal` turns one back into JSON | on for uploads |
-| 5 Relevance | Only entries related to the current turn are injected; red lines always come through, and the number blocked is stated at the end of the block | `inject.relevantOnly: true` |
-| 6 Add / edit / delete | Deletion only ever follows an explicit user command, and takes a snapshot first | always |
-
-Two hard rules live in code rather than in the portrait:
-
-- **No high-risk private data**: national ID, bank card, password and precise address are rejected outright (`--force` overrides) — knowing someone *has* an ID number is risk without portrait value.
-- **No raw transcripts on disk**: only structured entries are persisted.
-
-## Screenshots
-
-| Overview | Entries |
-| --- | --- |
-| ![overview](docs/screenshots/01-overview.png) | ![items](docs/screenshots/02-items.png) |
-
-| Pending candidates | Settings |
-| --- | --- |
-| ![pending](docs/screenshots/03-pending.png) | ![settings](docs/screenshots/06-settings.png) |
-
-## Quick start (no DSH required)
+### Try it with nothing but Node
 
 ```bash
-# storage only — the CLI never touches the network
-export DSH_USER_PROFILE_HOME=~/.dsh/user-profile   # or any directory you like
+git clone https://github.com/kaveys/agent-user-profile.git
+cd agent-user-profile
 node bin/profile.mjs init
-node bin/profile.mjs declare --dim taste --fact "prefers dense, monochrome UI" --confidence 0.9 --core
-node bin/profile.mjs build --all-scopes
-cat "$DSH_USER_PROFILE_HOME/inject.md"
+node bin/profile.mjs declare --dim taste --fact "用户偏爱克制的深色界面" --confidence 0.9
+node bin/profile.mjs build && node bin/profile.mjs show
 ```
 
-`inject.md` is what a host would put in front of the model. Everything else — panel, HTTP routes, extraction — is adapter code.
-
-## Install (DSH)
+### Use it inside DeepSeek Harness
 
 ```bash
-node scripts/register.mjs          # links the package into every profile + registers the cordis patch
-
-# restart DSH, then: Settings → 用户画像
+cp -r agent-user-profile ~/.dsh/plugins/dsh-user-profile
+node ~/.dsh/plugins/dsh-user-profile/scripts/register.mjs
 ```
 
-Requirements: Node >= 20 (uses `node:zlib` zstd for session logs) and a DSH installation for the plugin form. The CLI alone needs nothing but Node.
+Restart the app once; a "用户画像" (user profile) section appears in Settings with seven tabs. The first run is empty on purpose — it won't invent things about you. Talk to it for a while, add entries yourself, or paste what another AI told you about you into "备份与重置 → 从别的 AI 搬回来" and it will classify, score and de-duplicate it.
 
-## Tests
+### Share the same profile with other tools
 
 ```bash
-node tests/selftest.mjs      # unit: storage, conflict resolution, injection rendering
-node tests/e2e.mjs           # end-to-end: every CLI command + every HTTP action
-node tests/audit-1.mjs         # adversarial: bad input, path traversal, lost data
-node tests/render.mjs        # renders the real panel component with a tiny hooks runtime
+node mcp/server.mjs
+```
+
+A standard MCP server — any MCP client can read the same profile.
+
+## FAQ
+
+**Does it phone home?** No. Data stays in `~/.dsh/user-profile/`. Uploading an encrypted backup to your own WebDAV is opt-in and off by default.
+
+**Will it remember nonsense?** Three gates: only self-descriptions are extracted (translation, homework and error-hunting turns are skipped), unsure items wait for your approval, and near-duplicates are merged instead of piling up.
+
+**Can I undo a deletion?** Yes — a snapshot is taken before every destructive action (last 20 kept), restorable from the panel.
+
+**How big is it?** Tens of KB. No images, no chat logs.
+
+**Do I need DeepSeek Harness?** No. The data layer is a standalone CLI, and the MCP server runs on its own.
+
+## For developers
+
+- [DESIGN.md](DESIGN.md) — design trade-offs and why the injection is layered
+- [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) — what degrades on older hosts
+- [docs/POSITIONING.md](docs/POSITIONING.md) — how it differs from memory libraries, and how to port it
+- [CONTRIBUTING.md](CONTRIBUTING.md) — house rules and the checks to run
+- [SECURITY.md](SECURITY.md) — where data lives and the known boundaries
+- [CHANGELOG.md](CHANGELOG.md) — what changed in every version, and why
+
+Layout: `bin/profile.mjs` (data layer CLI), `lib/` (two pure-function modules for similarity and relevance), `index.js` (host-side capture + injection), `client.js` (settings UI), `mcp/server.mjs` (MCP surface). Zero dependencies, no build step.
+
+```bash
+node tests/selftest.mjs
+node tests/audit-1.mjs
+node tests/audit-10.mjs
 node scripts/verify-install.mjs
-```
-
-## Layout
-
-```
-index.js               host plugin: hooks, injection, HTTP routes, LLM extraction
-client.js              settings panel (hand-written bundle, no build step)
-bin/profile.mjs        storage + rendering + CLI (the portable core)
-cordis.patch.yml       plugin registration for DSH
-scripts/register.mjs   idempotent installer
-tests/selftest.mjs          unit tests        tests/e2e.mjs      end-to-end tests
-tests/audit-1.mjs             adversarial tests tests/render.mjs   panel render smoke test
-docs/                  design notes, positioning, changelog
 ```
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[MIT](LICENSE).
