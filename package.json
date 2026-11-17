@@ -18,13 +18,13 @@
     "memory-layer"
   ],
   "license": "MIT",
-  "homepage": "https://github.com/OWNER/agent-user-profile#readme",
+  "homepage": "https://github.com/kaveys/agent-user-profile#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/OWNER/agent-user-profile.git"
+    "url": "git+https://github.com/kaveys/agent-user-profile.git"
   },
   "bugs": {
-    "url": "https://github.com/OWNER/agent-user-profile/issues"
+    "url": "https://github.com/kaveys/agent-user-profile/issues"
   },
   "main": "index.js",
   "bin": {
