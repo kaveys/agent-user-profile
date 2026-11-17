@@ -134,7 +134,7 @@ const session = { id: 's1' }
 emit('session/event', session, { type: 'turn/start' })
 const injected = await step([{ role: 'user', content: [{ type: 'text', text: '帮我把这个脚本整理一下' }] }], { agent: { session } })
 const text = injected.messages.at(-1).content[0].text
-check('默认叠加：注入画像', text.includes('用户画像') && text.includes('偏好中文回答'))
+check('默认叠加：注入画像', text.includes('用户画像') && (text.includes('偏好中文回答') || text.includes('未带入')))
 check('注入块带指纹', text.includes('<!--dsh-user-profile-->'))
 
 // 5.6 个性化需求：画像升级为主要依据
@@ -147,6 +147,16 @@ check('个性化轮：要求不再反问画像里已有的偏好', persoText.inc
 check('规定来自插件内部，不走画像条目', persoText.includes('插件规定') && persoText.includes('不来自画像条目'))
 const plain = await step([{ role: 'user', content: [{ type: 'text', text: '把这个脚本整理一下' }] }], { agent: { session: s2 } })
 check('同轮不重复注入（个性化块不叠加）', plain.messages.length === perso.messages.length)
+
+// 5.7 相关性检索：只带本轮相关的条目，红线永远带
+const sRel = { id: 'sRel' }
+emit('session/event', sRel, { type: 'turn/start' })
+const unrelated = await step([{ role: 'user', content: [{ type: 'text', text: '帮我看看这个玄学问题：为什么随机数不随机' }] }], { agent: { session: sRel } })
+const unrelatedText = unrelated.messages.at(-1).content[0].text
+check('相关性闸门：无关条目被挡在外面并说明条数', unrelatedText.includes('未带入') || !unrelatedText.includes('偏好中文回答'))
+check('相关性闸门：红线仍然带入', unrelatedText.includes('红线与硬要求'))
+check('相关性闸门：规定不受影响', unrelatedText.includes('插件规定'))
+emit('session/event', sRel, { type: 'turn/end' })
 
 // 6 用户显式喊停
 emit('session/event', session, { type: 'turn/start' })

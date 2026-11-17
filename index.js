@@ -94,12 +94,14 @@ const DEFAULT_CONFIG = {
   enabled: true,
   inject: {
     mode: 'always',
-    maxChars: 1600,
-    topK: 8,
+    maxChars: 0,
+    topK: 0,
     coreDimensions: ['constraints', 'identity'],
     // 个性化需求以这些维度为主要依据（与 CLI 的 personalizeDimensions 同源）
     personalizeDimensions: ['taste', 'communication', 'habits', 'interests', 'goals'],
     priorityOnPersonalize: true,
+    // 只带入和本轮相关的条目（流程第 5 步：记忆不自动扩散）；红线永远带入。
+    relevantOnly: true,
     // 命中即判定「本轮需要个性化」，画像升级为主要依据
     personalizePatterns: [
       '个性化', '风格', '调性', '审美', '好看', '配色', '视觉', '排版', '界面', '布局',
@@ -124,6 +126,8 @@ const DEFAULT_CONFIG = {
     autoAcceptConfidence: 0.7,
     // 只把「可能对全局有用」的写进画像；项目局部的一律丢（见 EXTRACT_SYSTEM 的三道检查）
     requireGlobal: true,
+    // 流程第 1 步：纯干活的一轮（翻译、做题、查报错）不提炼，除非用户在讲自己
+    skipEphemeralTurns: true,
     timeoutMs: 45000,
     maxOutputTokens: 900,
     debugLog: false,
@@ -283,13 +287,106 @@ function policyLines(personalizing) {
   return lines
 }
 
+/** 造一串中日韩字符二元组，用来做零依赖的粗相关性匹配。 */
+function bigrams(text) {
+  const clean = String(text ?? '')
+    .toLowerCase()
+    .replace(/[^\p{Script=Han}a-z0-9]+/gu, ' ')
+  const out = new Set()
+  for (const token of clean.split(' ')) {
+    if (token.length === 0) continue
+    if (token.length === 1) out.add(token)
+    for (let i = 0; i + 1 < token.length; i += 1) out.add(token.slice(i, i + 2))
+  }
+  return out
+}
+
+/**
+ * 只带入和本轮有关的条目（流程第 5 步「记忆不自动扩散」）。
+ * 红线/硬要求永远带入——那是约束，不是参考；其余按字符二元组重叠判定。
+ * 判不出来（用户这轮没有文字、或全都不匹配）时宁可全带：漏掉画像比多带几条更糟。
+ */
+function relevantOnly(md, userText) {
+  const raw = typeof md === 'string' ? md : ''
+  const query = bigrams(userText)
+  if (raw.trim().length === 0 || query.size === 0) return { text: raw, dropped: 0 }
+
+  const lines = raw.split('\n')
+  const kept = []
+  let dropped = 0
+  let inRedline = false
+  let currentHeader = ''
+
+  const flushHeader = () => {
+    if (currentHeader) kept.push(currentHeader)
+    currentHeader = ''
+  }
+
+  for (const line of lines) {
+    if (line.startsWith('## ')) {
+      flushHeader()
+      currentHeader = line
+      inRedline = /红线|硬要求/.test(line)
+      continue
+    }
+    if (!line.startsWith('- [')) {
+      // 标题、`> 生成于…` 说明、空行、尾注：原样保留（标题里带着版本号，丢了下游就不知道这是画像）
+      if (/^\s*$/.test(line)) {
+        kept.push(line)
+      } else {
+        flushHeader()
+        kept.push(line)
+      }
+      continue
+    }
+    if (inRedline) {
+      if (currentHeader) { kept.push(currentHeader); currentHeader = '' }
+      kept.push(line)
+      continue
+    }
+    const grams = bigrams(line)
+    let hit = false
+    for (const gram of grams) {
+      if (query.has(gram)) { hit = true; break }
+    }
+    if (hit) {
+      if (currentHeader) { kept.push(currentHeader); currentHeader = '' }
+      kept.push(line)
+    } else {
+      dropped += 1
+    }
+  }
+  if (dropped === 0) return { text: raw, dropped: 0 }
+
+  let body = kept.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd()
+  body += `\n\n（另有 ${dropped} 条与本次无关的条目未带入；需要时可让我按关键词查。）`
+  return { text: `${body}\n`, dropped }
+}
+
+/**
+ * 临时任务 / 一次性问答的判定（流程第 1 步「触发判定层」）。
+ * 只做粗筛：命中「在讲自己」的强信号就直接提炼；纯干活（翻译、做题、查参数、看报错）不提炼。
+ * 判错方向选「宁可提炼」——漏掉一条偏好，比多提炼一条无关内容更难补。
+ */
+const SELF_DISCLOSURE = /(我是|我的|我平时|我习惯|我喜欢|我不喜欢|我要|我需要|我在|对我来说|以后|今后|今后都|记住|记一下|别再|不要再|每次都|一律)/
+
+const EPHEMERAL_TURN = /(翻译一下|帮我翻译|翻译成|这道题|做题|作业|选择题|填空题|算一下|计算一下|求导|解方程|这个报错|报错原因|为什么报错|怎么修|语法|函数签名|参数怎么|api 怎么|文档在哪|下载|安装一下)/i
+
+function worthExtracting(userText) {
+  const text = typeof userText === 'string' ? userText : ''
+  if (text.trim().length === 0) return false
+  if (SELF_DISCLOSURE.test(text)) return true
+  return !EPHEMERAL_TURN.test(text)
+}
+
 function buildBlock(md, portrait, cfg, personalizing = false) {
-  const limit = Number.isFinite(cfg.inject.maxChars) && cfg.inject.maxChars > 0
-    ? cfg.inject.maxChars
-    : DEFAULT_CONFIG.inject.maxChars
+  const configured = Number.isFinite(cfg?.inject?.maxChars) ? cfg.inject.maxChars : DEFAULT_CONFIG.inject.maxChars
+  // 0/负数 = 不设上限（v15 之后的约定）。这里绝不能把 0 当成「预算 0 字」，
+  // 否则整份画像会被截成一行省略号——这个坑正是被「默认叠加：注入画像」用例抓到的。
+  const limit = configured > 0 ? configured : 0
   // inject.md 已按预算切好，一般不会触发截断；profile.md 兜底时才可能截。
   const raw = typeof md === 'string' ? md : ''
-  const body = raw.length > limit ? `${raw.slice(0, limit)}\n…（画像正文已按 maxChars 截断）` : raw
+  const body = limit > 0 && raw.length > limit ? `${raw.slice(0, limit)}\n…（画像正文已按 maxChars 截断）` : raw
 
   const lines = ['<system-reminder>', MARKER, `【${POLICY_TITLE}】`, ...policyLines(personalizing), '']
 
@@ -460,7 +557,9 @@ const ACTION_ROUTE = '/user-profile/action'
       const mode = typeof input?.mode === 'string' ? input.mode : 'dry-run'
       if (mode === 'out') {
         if (typeof input.dir !== 'string' || input.dir.length === 0) return { ok: false, error: '缺少 dir' }
-        return runCli(['backup', '--out', input.dir])
+        const args = ['backup', '--out', input.dir]
+        if (input.encrypt === true) args.push('--encrypt')
+        return runCli(args)
       }
       if (mode === 'list') return runCli(['backup', '--list'], 40000)
       if (mode === 'upload') return runCli(['backup'], 60000)
@@ -812,6 +911,17 @@ const ACTION_ROUTE = '/user-profile/action'
       .slice(0, ex.maxInputChars)
     if (dialogue.length < ex.minInputChars) return
 
+    // 触发判定（流程第 1 步）：临时任务/一次性问答不提取。
+    // 判据是「用户有没有在讲自己」——讲了自己就值得提炼，纯粹让我干活就不必。
+    const userSaid = buffer
+      .filter((item) => item.who === 'user')
+      .map((item) => item.text)
+      .join('\n')
+    if (ex.skipEphemeralTurns !== false && !worthExtracting(userSaid)) {
+      log('skip extract: ephemeral turn')
+      return
+    }
+
     const route = sessionRoute.get(session)
       ?? (typeof ex.provider === 'string' && ex.provider.length > 0 && typeof ex.model === 'string' && ex.model.length > 0
         ? { provider: ex.provider, model: ex.model }
@@ -1071,7 +1181,13 @@ const ACTION_ROUTE = '/user-profile/action'
           const personalizing = isPersonalizeTurn(userText) && cfg.inject.priorityOnPersonalize !== false
           if (personalizing) log('personalize turn → profile as primary basis')
           // 规定与数据分开：规定永远进，数据有多少带多少（没有就只带规定）。
-          const usable = injectable(portrait, md) ? md : ''
+          let usable = injectable(portrait, md) ? md : ''
+          // 相关性检索（流程第 5 步）：只把和本轮有关的条目带进来，记忆不自动扩散。
+          if (usable && cfg.inject?.relevantOnly !== false) {
+            const gated = relevantOnly(usable, userText)
+            if (gated.dropped > 0) log('relevance gate dropped', gated.dropped, 'items')
+            usable = gated.text
+          }
           if (!usable) log('no profile items, injecting policy only', portrait?.status)
           portraitBlock = buildBlock(usable, portrait, cfg, personalizing)
           log('injected', usable ? mdSource : 'policy-only', `v${portrait?.revision}`)

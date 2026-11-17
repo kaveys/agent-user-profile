@@ -37,6 +37,24 @@ Every task starts with three things:
 | **Snapshot rollback** | Every destructive write takes a snapshot first (`snapshots/declarations-*.jsonl`, capped at 20). One command — or one click on *Restore points* — puts it back. |
 | **Policy separated from data** | How the portrait is used lives in code and cannot be edited or deleted from the portrait. Reset the data and the rules still apply. |
 
+## Six-step memory pipeline (v17)
+
+Recording is gated at every step, and each gate can be switched off on its own.
+
+| Step | What happens | Default |
+| --- | --- | --- |
+| 1 Trigger | A turn is only mined when the user talks about *themselves*; translation, homework and "why does this error" turns are skipped | `extract.skipEphemeralTurns: true` |
+| 2 Extract & normalise | Structured `{dim, key, fact, confidence, scope}` records only — transcripts are never written to disk. Near-duplicates merge; the loser goes to history | `build.dedupe: true` |
+| 3 Conflicts & partitions | Contradictions follow `newest` / `freeze`; the ten dimensions roll up into `user_profile` / `user_preference` / `user_social_network` | `conflicts.strategy: newest` |
+| 4 Encryption | Backup packages are encrypted on upload (AES-256-GCM); `backup --out --encrypt` too, and `profile unseal` turns one back into JSON | on for uploads |
+| 5 Relevance | Only entries related to the current turn are injected; red lines always come through, and the number blocked is stated at the end of the block | `inject.relevantOnly: true` |
+| 6 Add / edit / delete | Deletion only ever follows an explicit user command, and takes a snapshot first | always |
+
+Two hard rules live in code rather than in the portrait:
+
+- **No high-risk private data**: national ID, bank card, password and precise address are rejected outright (`--force` overrides) — knowing someone *has* an ID number is risk without portrait value.
+- **No raw transcripts on disk**: only structured entries are persisted.
+
 ## Screenshots
 
 | Overview | Entries |

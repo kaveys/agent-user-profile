@@ -815,6 +815,7 @@ window.__ModuleLoader__.load({
         { path: 'extract.autoAcceptConfidence', label: '多确定才自动收录', type: 'number', hint: '0–1；低于这个值会先放进「待审」等你确认' },
       ] },
       { group: '更新与隐私', fields: [
+        { path: 'inject.relevantOnly', label: '只带入和本轮相关的条目', type: 'bool', hint: '关掉则每次把整份画像都带进来（红线永远带入）' },
         { path: 'build.autoBuild', label: '画像随对话自动更新', type: 'bool', hint: '关掉后只在点「立即更新」时重算' },
         { path: 'capture.turnText', label: '允许读取对话正文来提炼', type: 'bool', hint: '正文只进模型、不落盘；关掉就只能靠你自己说过的内容' },
         { path: 'redaction.mode', label: '敏感信息处理', type: 'select', options: ['preset', 'patterns', 'unknown'], optionLabels: ['自动抹掉手机号·邮箱·证件号·密钥（preset）', '只用自定义规则（patterns）', '先别动（unknown）'] },
@@ -903,6 +904,7 @@ window.__ModuleLoader__.load({
       const [snapArmed, setSnapArmed] = React.useState('')
       const [showAllSnaps, setShowAllSnaps] = React.useState(false)
       const [davDir, setDavDir] = React.useState('')
+    const [encBackup, setEncBackup] = React.useState(false)
       const snapshots = Array.isArray(data.snapshots) ? data.snapshots : []
       const visibleSnaps = showAllSnaps ? snapshots : snapshots.slice(0, 5)
       return h('div', { style: styles.wrap },
@@ -959,10 +961,13 @@ window.__ModuleLoader__.load({
                 value: davDir,
                 onChange: (event) => setDavDir(event.target.value),
               }),
-              h(Btn, { mini: true, disabled: busy || davDir.trim() === '', onClick: () => run({ action: 'backup', mode: 'out', dir: davDir.trim() }) }, '导出到本地'),
+              h(Btn, { mini: true, disabled: busy || davDir.trim() === '', onClick: () => run({ action: 'backup', mode: 'out', dir: davDir.trim(), encrypt: encBackup }) }, encBackup ? '加密导出到本地' : '导出到本地'),
               h(Btn, { mini: true, disabled: busy, onClick: () => run({ action: 'backup', mode: 'upload' }) }, '上传到 WebDAV'),
               h(Btn, { mini: true, disabled: busy, onClick: () => run({ action: 'backup', mode: 'list' }) }, '看远端备份')),
-            h('div', { style: styles.note }, 'WebDAV 的地址与账号在「设置 → 云端备份」里填；密码建议放环境变量 DSH_PROFILE_WEBDAV_PASSWORD，不写进配置文件。'))),
+            h('label', { style: styles.check },
+              h('input', { type: 'checkbox', checked: encBackup, onChange: (event) => setEncBackup(event.target.checked) }),
+              '导出时加密（口令取 DSH_PROFILE_PASSPHRASE / secrets.json；上传默认已加密）'),
+            h('div', { style: styles.note }, 'WebDAV 的地址与账号在「设置 → 云端备份」里填；密码建议放环境变量 DSH_PROFILE_WEBDAV_PASSWORD，不写进配置文件。加密包是 AES-256-GCM，回灌前先 `profile unseal --file <包>`。'))),
         h(Section, { title: '批量导入', extra: h('span', { style: styles.note }, '接受 [{"dim","fact","key"}] 或 {"items":[…]}]，也认一行一条的 JSONL') },
           h('textarea', { style: styles.textarea, value: json, placeholder: '[{ "dim": "taste", "fact": "用户偏好结论先行", "confidence": 0.9 }]', onChange: (event) => setJson(event.target.value) }),
           h('div', { style: styles.formRow },

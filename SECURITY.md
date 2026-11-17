@@ -21,6 +21,19 @@
 - 历史条目用 `profile redact` 先扫描后写回（`--apply`），写回前自动留快照。
 - 姓名、住址、学号等不在预设里，需要自定义 `redaction.patterns`；`redaction.mode=unknown` 时不做任何替换（明确表示「规则还没定」，而不是假装安全）。
 
+## 加密（v17）
+
+- **会离开本机的只有备份包**，所以加密只做在这一层：WebDAV 上传默认加密，`backup --out --encrypt` 可加密导出。
+- 算法 AES-256-GCM，密钥用 scrypt 从口令派生（16 字节随机盐、12 字节 IV，每次导出都不同）。
+- 口令来源优先级：`--passphrase` → `DSH_PROFILE_PASSPHRASE` → `secrets.json` 的 `profilePassphrase`；口令长度不足 6 位直接拒绝。
+- 加密包是 `{"kind":"dsh-user-profile-backup-sealed", ...}`，`profile unseal --file <包>` 还原成可 `import` 的 JSON；口令错时 GCM 校验失败并报「口令不对，或文件被改动过」，不会产出半截数据。
+- **本机磁盘没有全库加密**：数据在 `~/.dsh/user-profile/`，靠操作系统账户隔离。理由写在 `docs/CHANGES-v17.md`——全库加密要求每次 CLI 调用都带口令，收益只覆盖「硬盘被拿走」这一种场景。
+
+## 高风险隐私直接不收（v17）
+
+证件号、银行卡号、密码/口令、精确住址（如「3 号楼 502 室」）在写入前就被拒绝，不做打码入库：
+「记着他有身份证号」本身就是风险，没有画像价值。`--force` 可越过拦截，但打码规则随后仍会生效。
+
 ## WebDAV 备份的边界（v15）
 
 - 密码只从环境变量（默认 `DSH_PROFILE_WEBDAV_PASSWORD`）或 `secrets.json` 读，**不写进 config.json**，也不进备份包。

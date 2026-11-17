@@ -5,6 +5,20 @@ The portrait schema version is tracked separately and lives in `config.json`.
 
 ## Unreleased
 
+### v17 — reorganised around a six-step memory pipeline
+
+### Added
+- **Trigger gate**: one-off work (translation, homework, "what does this error mean") is no longer mined for preferences; a turn is only distilled when the user talks about themselves. `extract.skipEphemeralTurns` (default on).
+- **Hard privacy blocks**: national ID, bank card, password and precise address are rejected outright instead of being masked — "he has an ID number" is risk without portrait value. `--force` overrides; masking still applies afterwards.
+- **Three partitions**: every dimension maps to `user_profile` / `user_preference` / `user_social_network`; `panel` reports `partitions` and each item carries `partition`.
+- **Relevance gate**: before injection, non-redline items are filtered by character-bigram overlap with the current turn; redlines always come through, and the count of dropped items is stated in the block. `inject.relevantOnly` (default on, editable in Settings and via `set`).
+- **Encrypted backups**: AES-256-GCM (scrypt-derived key) for `backup --encrypt` and by default for WebDAV uploads; new `unseal` command turns a sealed package back into importable JSON.
+
+### Fixed
+- `inject.maxChars = 0` (the "no cap" convention) was treated as a zero-length budget, truncating the whole portrait to a single ellipsis line.
+- The relevance gate dropped the `# 用户画像 vN` title and its `> 生成于 …` line, leaving the injected block unattributable.
+- `inject.relevantOnly` was missing from `SET_SPEC` and the panel settings payload, so it could not be changed.
+
 ### v15 — quality gates instead of size caps
 
 ### Added

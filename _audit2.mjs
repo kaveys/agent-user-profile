@@ -195,5 +195,58 @@ const rjl = (home, rel) => {
   ok('手动写入数据未 build 时 panel 标出漂移', json.drift?.stale === true, JSON.stringify(json.drift))
 }
 
+// 16. 六步流水线：高风险隐私拦截 + 三类分区 + 相关性开关
+{
+  const home = fresh()
+  const idcard = run(home, ['declare', '--dim', 'identity', '--fact', '用户的证件号 110101199003071234'])
+  ok('证件号被直接拦截，不入库', idcard.code !== 0 && idcard.out.includes('已拦截'), idcard.out.trim().split('\n')[0])
+  const card = run(home, ['declare', '--dim', 'identity', '--fact', '用户的银行卡 6222 0202 0000 1111 222'])
+  ok('银行卡号被直接拦截', card.code !== 0 && card.out.includes('已拦截'))
+  const pwd = run(home, ['declare', '--dim', 'identity', '--fact', '用户的登录密码是 hunter2hunter2'])
+  ok('密码被直接拦截', pwd.code !== 0 && pwd.out.includes('已拦截'))
+  const forced = run(home, ['declare', '--dim', 'identity', '--fact', '用户的手机 13800138000', '--force'])
+  ok('--force 可强行写入（打码后）', forced.code === 0 && rjl(home, 'declarations.jsonl').length === 1, forced.out.trim().split('\n')[0])
+  ok('手机号即使 --force 也被打码', !readFileSync(join(home, 'declarations.jsonl'), 'utf8').includes('13800138000'))
+
+  run(home, ['declare', '--dim', 'social', '--fact', '用户和同事一起做项目，偏好结对', '--confidence', '0.8'])
+  run(home, ['declare', '--dim', 'identity', '--fact', '用户是本科在读学生', '--confidence', '0.9'])
+  run(home, ['build', '--all-scopes'])
+  const p = run(home, ['panel'])
+  const json = JSON.parse(p.out.trim())
+  const parts = json.partitions ?? []
+  const byId = Object.fromEntries(parts.map((x) => [x.id, x.n]))
+  ok('面板给出三类分区统计', parts.length === 3 && byId.user_profile >= 1 && byId.user_social_network >= 1, JSON.stringify(byId))
+  ok('条目自带分区字段', json.items.every((item) => typeof item.partition === 'string' && item.partition.startsWith('user_')))
+  ok('设置里能看到相关性开关', json.settings?.inject?.relevantOnly === true)
+  const off = run(home, ['set', 'inject.relevantOnly', 'false'])
+  ok('相关性开关可关闭', off.code === 0 && JSON.parse(run(home, ['panel']).out.trim()).settings.inject.relevantOnly === false)
+}
+
+// 17. 备份包加密：seal → unseal 往返，口令错必须失败
+{
+  const home = fresh()
+  const saved = process.env.DSH_PROFILE_PASSPHRASE
+  process.env.DSH_PROFILE_PASSPHRASE = 'audit-pass-123456'
+  try {
+    run(home, ['declare', '--dim', 'taste', '--fact', '用户偏好深色界面', '--confidence', '0.9'])
+    const out = join(home, 'bak')
+    const made = run(home, ['backup', '--out', out, '--encrypt'])
+    const files = readdirSync(out).filter((f) => f.endsWith('.json.enc'))
+    ok('加密备份能生成 .json.enc', made.code === 0 && files.length === 1, files[0] ?? made.out.trim().slice(0, 80))
+    const enc = join(out, files[0])
+    const raw = readFileSync(enc, 'utf8')
+    ok('密文里看不到明文内容', !raw.includes('用户偏好深色界面') && raw.includes('dsh-user-profile-backup-sealed'))
+    const opened = run(home, ['unseal', '--file', enc])
+    const plainFile = enc.replace(/\.enc$/, '')
+    ok('unseal 能还原出可导入的 JSON', opened.code === 0 && existsSync(plainFile) && JSON.parse(readFileSync(plainFile, 'utf8')).declarations.length === 1)
+    process.env.DSH_PROFILE_PASSPHRASE = 'wrong-pass-000000'
+    const bad = run(home, ['unseal', '--file', enc, '--out', join(home, 'wrong.json')])
+    ok('口令不对时解密失败而不是产出垃圾', bad.code !== 0 && bad.out.includes('解密失败'), bad.out.trim().split('\n')[0])
+  } finally {
+    if (saved === undefined) delete process.env.DSH_PROFILE_PASSPHRASE
+    else process.env.DSH_PROFILE_PASSPHRASE = saved
+  }
+}
+
 console.log(`\n通过 ${pass} 项，失败 ${fails.length} 项`)
 if (fails.length) { console.log('失败列表:'); for (const f of fails) console.log(' - ' + f); process.exitCode = 1 }

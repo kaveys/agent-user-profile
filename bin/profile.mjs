@@ -26,6 +26,7 @@ import {
 import { basename, join } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
+import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto'
 
 const HOME = process.env.DSH_USER_PROFILE_HOME || join(homedir(), '.dsh', 'user-profile')
 const p = (...parts) => join(HOME, ...parts)
@@ -114,6 +115,24 @@ const DIMENSIONS = [
 
 const DIMENSION_LABELS = Object.fromEntries(DIMENSIONS.map((d) => [d.id, d.label]))
 const DIMENSION_HINTS = Object.fromEntries(DIMENSIONS.map((d) => [d.id, d.hint]))
+
+/**
+ * 三类分区（流程第 3 步）：把十个大类折成 user_profile / user_preference / user_social_network。
+ * 大类回答「记什么」，分区回答「这是他的哪一面」——面板、导出、以及将来按分区清空都用它。
+ */
+const PARTITIONS = [
+  { id: 'user_profile', label: '基础身份', dims: ['identity', 'work', 'skills', 'goals', 'constraints'] },
+  { id: 'user_preference', label: '偏好', dims: ['taste', 'communication', 'habits', 'interests'] },
+  { id: 'user_social_network', label: '社交', dims: ['social'] },
+]
+
+function partitionOf(dim) {
+  for (const p of PARTITIONS) {
+    if (p.dims.includes(dim)) return p.id
+  }
+  // 自定义大类默认归「偏好」：用户自己加的多半就是偏好类
+  return 'user_preference'
+}
 const BUILTIN_DIMENSION_IDS = DIMENSIONS.map((d) => d.id)
 
 /** 旧维度（v5 及以前）→ 新大类。只用于迁移，跑过一次就再也用不到。 */
@@ -172,6 +191,8 @@ const DEFAULT_CONFIG = {
     personalizeDimensions: ['taste', 'communication', 'habits', 'interests', 'goals'],
     // 是否在注入块里单列「个性化首选」段；关掉则退回「全部按权重排」的老样子
     priorityOnPersonalize: true,
+    // 只带入和本轮相关的条目（流程第 5 步：记忆不自动扩散）；关掉则整份画像全带
+    relevantOnly: true,
     announceSuppressed: true,
     maxAgeDays: 30,
     // 注入块尾部附一句「轮末可 declare --pending」，把自动蒸馏变成可审核的候选
@@ -417,6 +438,9 @@ function validateEntry(record, config) {
   if (fact.length > FACT_MAX_LEN) reasons.push(`内容过长（${fact.length} 字，上限 ${FACT_MAX_LEN}）`)
   if (STRUCTURE_BREAKERS.test(fact)) reasons.push('内容里有标题标记 / HTML 注释 / 伪造的规定段，会被渲染成别的结构')
   if (/[\r\n]/.test(fact)) reasons.push('内容含换行，注入时会变成多条')
+  // 高风险隐私（证件号/银行卡/密码/精确住址）：不是"打码后记录"，而是根本不记。
+  const privacy = blockedPrivacy(fact)
+  if (privacy.length > 0) reasons.push(`内容含高风险隐私（${privacy.join('、')}），不该入库`)
   if (typeof record?.dim !== 'string' || !Array.isArray(config?.dimensions) || !config.dimensions.includes(record.dim)) {
     reasons.push(`维度不合法（${record?.dim ?? '空'}）`)
   }
@@ -631,6 +655,28 @@ const REDACTION_PRESETS = {
   },
 }
 
+/**
+ * 高风险隐私：命中一律拦截，不入库（打码也不算——记下"他有身份证号"本身就没价值）。
+ * 与上面四个 preset 的区别：手机号/邮箱打码后仍有画像价值（联系方式类型），证件号/银行卡/密码只该是空气。
+ */
+const BLOCK_PATTERNS = [
+  { label: '证件号', pattern: '(?<!\\d)\\d{17}[\\dXx](?!\\d)' },
+  { label: '银行卡号', pattern: '(?<!\\d)(?:\\d[ -]?){16,19}(?!\\d)' },
+  { label: '密码/口令', pattern: '(密码|口令|password|passwd)\\s*(是|为|:|：|=)\\s*\\S{4,}' },
+  { label: '精确住址', pattern: '(?<![\\d\\w])\\d{1,3}\\s*号楼?\\s*\\d{1,4}\\s*(室|号房|单元)' },
+]
+
+/** 返回命中的高风险隐私类别（空数组=可以入库）。 */
+function blockedPrivacy(text) {
+  if (typeof text !== 'string' || !text) return []
+  const hits = []
+  for (const rule of BLOCK_PATTERNS) {
+    if (new RegExp(rule.pattern).test(text)) hits.push(rule.label)
+  }
+  return hits
+}
+
+
 /** 逐条正则替换；返回换了多少处（0 表示这条内容是干净的）。 */
 function redactWithCount(text, config) {
   if (typeof text !== 'string') return { text: '', hits: 0 }
@@ -759,6 +805,14 @@ function cmdDeclare({ flags }) {
   const source = flags.source === 'model' ? 'model' : 'user'
   const confidence = Number.isFinite(Number(flags.confidence)) ? Number(flags.confidence) : (source === 'user' ? 1 : 0.6)
   const scopeKind = typeof flags.scope === 'string' && flags.scope.length > 0 ? flags.scope : 'global'
+  // 高风险隐私一律拦截（流程第 1 步）：证件号 / 银行卡 / 密码 / 精确住址不打码入库，
+  // 因为「记着他有身份证号」这件事本身就没有画像价值，留着只是风险。
+  if (flags.force !== true) {
+    const blocked = blockedPrivacy(fact)
+    if (blocked.length > 0) {
+      die(`已拦截：内容含${blocked.join('、')}，不进记忆库（确需记录请显式加 --force，或改写成不含该信息的结论）`)
+    }
+  }
   // 写入时脱敏：命中手机号/邮箱/证件号/密钥就替换成占位符，并把命中次数写进回执。
   const cleaned = redactWithCount(fact, config)
   const record = {
@@ -1386,6 +1440,7 @@ function cmdPanel() {
     drift,
     items: items.map((item, index) => ({
       rank: index + 1,
+      partition: partitionOf(item.dim),
       id: item.id,
       dim: item.dim,
       dimLabel: item.dimLabel,
@@ -1470,6 +1525,7 @@ function cmdPanel() {
         coreDimensions: [...config.inject.coreDimensions],
         personalizeDimensions: [...(config.inject.personalizeDimensions ?? DEFAULT_CONFIG.inject.personalizeDimensions)],
         priorityOnPersonalize: config.inject.priorityOnPersonalize !== false,
+        relevantOnly: config.inject.relevantOnly !== false,
         distillHint: config.inject.distillHint !== false,
         announceSuppressed: config.inject.announceSuppressed !== false,
       },
@@ -1518,6 +1574,12 @@ function cmdPanel() {
       history: historyItems.length,
     },
     history: historyItems.slice(0, 30),
+    // 三类分区汇总（流程第 3 步）：一眼看出「身份/偏好/社交」各有多少条。
+    partitions: PARTITIONS.map((p) => ({
+      id: p.id,
+      label: p.label,
+      n: payload.items.filter((item) => item.partition === p.id).length,
+    })),
     // 快照列表：面板的「恢复」需要知道有哪些可回退点。
     snapshots: listSnapshots(12),
   }
@@ -2002,6 +2064,7 @@ const SET_SPEC = {
   'inject.coreDimensions': { type: 'dimensionList', note: '这些大类的条目必进注入块' },
   'inject.personalizeDimensions': { type: 'dimensionList', note: '个性化需求时的主要依据' },
   'inject.priorityOnPersonalize': { type: 'boolean', note: '个性化轮是否以画像为主要依据' },
+  'inject.relevantOnly': { type: 'boolean', note: '只带入和本轮相关的条目（红线永远带入）' },
   'inject.announceSuppressed': { type: 'boolean', note: '喊停时是否在结果里声明' },
   'inject.distillHint': { type: 'boolean', note: '注入块尾部是否附轮末候选提示' },
   'conflicts.strategy': { type: 'enum', values: ['newest', 'freeze'], note: 'newest=新值覆盖；freeze=谁都不选边' },
@@ -2341,6 +2404,82 @@ async function davList(dav) {
     .filter((name) => name.endsWith('.json'))
 }
 
+/**
+ * 备份包加密（流程第 4 步「加密持久化」里唯一真正出门的一环）。
+ * 本机磁盘的隔离交给操作系统账户；备份是要上传/拷贝出去的，所以默认就该是密文。
+ * AES-256-GCM + scrypt 派生，口令来自 --passphrase / DSH_PROFILE_PASSPHRASE / secrets.json。
+ */
+const SEALED_KIND = 'dsh-user-profile-backup-sealed'
+
+function profilePassphrase(flags = {}) {
+  const fromFlag = typeof flags.passphrase === 'string' && flags.passphrase.length >= 6 ? flags.passphrase : ''
+  const fromEnv = typeof process.env.DSH_PROFILE_PASSPHRASE === 'string' && process.env.DSH_PROFILE_PASSPHRASE.length >= 6
+    ? process.env.DSH_PROFILE_PASSPHRASE
+    : ''
+  const fromFile = (() => {
+    try {
+      const secrets = JSON.parse(readFileSync(p('secrets.json'), 'utf8'))
+      const value = secrets?.profilePassphrase
+      return typeof value === 'string' && value.length >= 6 ? value : ''
+    } catch {
+      return ''
+    }
+  })()
+  const pass = fromFlag || fromEnv || fromFile
+  if (pass.length < 6) {
+    die('加密需要口令（至少 6 位）：用 --passphrase "<口令>"、环境变量 DSH_PROFILE_PASSPHRASE，或写进 secrets.json 的 profilePassphrase')
+  }
+  return pass
+}
+
+function sealText(plainText, passphrase) {
+  const salt = randomBytes(16)
+  const iv = randomBytes(12)
+  const key = scryptSync(passphrase, salt, 32)
+  const cipher = createCipheriv('aes-256-gcm', key, iv)
+  const data = Buffer.concat([cipher.update(plainText, 'utf8'), cipher.final()])
+  return JSON.stringify({
+    kind: SEALED_KIND,
+    v: 1,
+    alg: 'aes-256-gcm+scrypt',
+    salt: salt.toString('base64'),
+    iv: iv.toString('base64'),
+    tag: cipher.getAuthTag().toString('base64'),
+    data: data.toString('base64'),
+  }, null, 2)
+}
+
+function unsealText(sealedText, passphrase) {
+  let envelope
+  try {
+    envelope = JSON.parse(sealedText)
+  } catch {
+    die('这不是有效的加密包（JSON 解析失败）')
+  }
+  if (envelope?.kind !== SEALED_KIND) die(`这不是本插件导出的加密包（kind=${envelope?.kind ?? '空'}）`)
+  const salt = Buffer.from(String(envelope.salt ?? ''), 'base64')
+  const iv = Buffer.from(String(envelope.iv ?? ''), 'base64')
+  const tag = Buffer.from(String(envelope.tag ?? ''), 'base64')
+  const key = scryptSync(passphrase, salt, 32)
+  try {
+    const decipher = createDecipheriv('aes-256-gcm', key, iv)
+    decipher.setAuthTag(tag)
+    return Buffer.concat([decipher.update(Buffer.from(String(envelope.data ?? ''), 'base64')), decipher.final()]).toString('utf8')
+  } catch {
+    die('解密失败：口令不对，或文件被改动过')
+  }
+}
+
+function cmdUnseal({ flags }) {
+  if (typeof flags.file !== 'string') die('缺少 --file <加密包.json>')
+  if (!existsSync(flags.file)) die(`找不到文件：${flags.file}`)
+  const passphrase = profilePassphrase(flags)
+  const plain = unsealText(readFileSync(flags.file, 'utf8'), passphrase)
+  const out = typeof flags.out === 'string' ? flags.out : flags.file.replace(/\.enc$/, '').replace(/\.json$/, '') + '.json'
+  writeFileSync(out, plain.endsWith('\n') ? plain : `${plain}\n`, 'utf8')
+  process.stdout.write(`已解密到 ${out}\n（用 profile import --file "${out}" 回灌）\n`)
+}
+
 async function cmdBackup({ flags }) {
   const config = loadConfig()
   const dav = webdavSettings(config)
@@ -2348,12 +2487,17 @@ async function cmdBackup({ flags }) {
   // 只做本地导出：不配 WebDAV 也能拿走一份可回灌的包
   if (typeof flags.out === 'string') {
     const payload = backupPayload(config)
-    const target = flags.out.endsWith('.json')
+    const plain = `${JSON.stringify(payload, null, 2)}\n`
+    const sealed = flags.encrypt === true
+    const text = sealed ? sealText(plain, profilePassphrase(flags)) : plain
+    const suffix = sealed ? '.json.enc' : '.json'
+    const target = flags.out.endsWith('.json') || flags.out.endsWith('.enc')
       ? flags.out
-      : join(flags.out, `user-profile-${nowIso().replace(/[:.]/g, '-')}.json`)
-    mkdirSync(flags.out.endsWith('.json') ? join(flags.out, '..') : flags.out, { recursive: true })
-    writeFileSync(target, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
-    process.stdout.write(`已导出到 ${target}\n  ${payload.declarations.length} 条声明 · 待审 ${payload.pending.length} 条\n`)
+      : join(flags.out, `user-profile-${nowIso().replace(/[:.]/g, '-')}${suffix}`)
+    mkdirSync(flags.out.endsWith('.json') || flags.out.endsWith('.enc') ? join(flags.out, '..') : flags.out, { recursive: true })
+    writeFileSync(target, text, 'utf8')
+    process.stdout.write(`已导出到 ${target}${sealed ? '（已加密）' : ''}\n  ${payload.declarations.length} 条声明 · 待审 ${payload.pending.length} 条\n`)
+    if (sealed) process.stdout.write('  回灌前先解密：profile unseal --file "<该文件>"\n')
     return
   }
 
@@ -2378,13 +2522,16 @@ async function cmdBackup({ flags }) {
   }
 
   const payload = backupPayload(config)
-  const text = `${JSON.stringify(payload, null, 2)}\n`
+  const plain = `${JSON.stringify(payload, null, 2)}\n`
+  // 上传路径默认加密：包一旦离开本机，口令就成了解密的唯一门槛。
+  const sealed = flags.encrypt !== false
+  const text = sealed ? sealText(plain, profilePassphrase(flags)) : plain
   const stamp = nowIso().replace(/[:.]/g, '-')
   const host = String(payload.host).replace(/[^\w.-]/g, '_')
-  const name = `user-profile-${host}-${stamp}.json`
+  const name = `user-profile-${host}-${stamp}.json${sealed ? '.enc' : ''}`
 
   if (flags['dry-run'] === true) {
-    process.stdout.write(`会备份到 ${davFileUrl(dav, name)}\n  声明 ${payload.declarations.length} 条 · 待审 ${payload.pending.length} 条 · ${Buffer.byteLength(text)} 字节\n`)
+    process.stdout.write(`会备份到 ${davFileUrl(dav, name)}${sealed ? '（已加密）' : ''}\n  声明 ${payload.declarations.length} 条 · 待审 ${payload.pending.length} 条 · ${Buffer.byteLength(text)} 字节\n`)
     return
   }
   const uploaded = await davUpload(dav, name, text)
@@ -2414,6 +2561,7 @@ const COMMANDS = {
   validate: cmdValidate,
   redact: cmdRedact,
   backup: cmdBackup,
+  unseal: cmdUnseal,
 }
 
 // 改写型命令必须串行：它们都是「读全量 → 改几条 → 整表写回」，
