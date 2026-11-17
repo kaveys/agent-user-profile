@@ -734,6 +734,29 @@ const ACTION_ROUTE = '/user-profile/action'
       return runCli(['merge', '--keep', input.keep, '--drop', input.drop])
     },
     /** 粘贴 JSON 批量导入：CLI 只吃文件，所以先落一个临时文件再交给它。 */
+    // 从别的 AI 搬回画像（v24）：面板里贴一段「你掌握了我什么」，CLI 负责切分/归类/定权。
+    // 文本走临时文件而不是命令行参数 —— Windows 单个参数上限 32k，整段答复很容易超。
+    ingest(input) {
+      const text = typeof input.text === 'string' ? input.text : ''
+      if (text.trim().length === 0) return { ok: false, error: '请先贴入别的 AI 给出的答复' }
+      const source = typeof input.source === 'string' && input.source.trim().length > 0
+        ? input.source.trim().slice(0, 40)
+        : 'other-ai'
+      const file = join(tmpdir(), `dsh-user-profile-ingest-${Date.now()}-${process.pid}.txt`)
+      writeFileSync(file, text, 'utf8')
+      try {
+        const args = ['ingest', '--file', file, '--source', source]
+        if (input.apply === true) args.push('--apply')
+        return runCli(args, 30000)
+      } finally {
+        try {
+          unlinkSync(file)
+        } catch {
+          // 临时文件删不掉不影响结果
+        }
+      }
+    },
+
     importText(input) {
       const items = Array.isArray(input.items) ? input.items : undefined
       if (items === undefined) return { ok: false, error: '缺少 items 数组' }

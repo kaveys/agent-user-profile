@@ -879,6 +879,235 @@ function cmdDeclare({ flags }) {
   rebuildQuietly()
   process.stdout.write(`已记录 [${dim}] ${record.fact}${clampNote}${redactNote}\n（画像已刷新）\n`)}
 
+// ---------------------------------------------------------------- ingest（v24）
+// 从别的 AI 搬回画像：用户去问「你掌握了关于我的什么信息」，把答复整段贴进来。
+// 这里做三件事，全部是确定性规则，报告里逐条能看到依据：
+//   1. 切分：按行 / 列表符号 / 句号拆成一条条陈述，扔掉寒暄与表头；
+//   2. 归类：按「大类优先级表」匹配关键词，第一条命中的大类胜出（可解释、可复现）；
+//   3. 定权：0.55 起步，硬性要求 +0.15、稳定特征 +0.10、同批佐证 +0.05、含糊措辞 −0.12，
+//      夹在 0.35~0.85；constraints 且是硬性要求的直接给 0.85 并标核心。
+// 二手来源永远拿不到 1.0：话是别的 AI 转述的，不是用户亲口确认的。
+const INGEST_PRIORITY = [
+  // 顺序即优先级：一句话同时命中多个大类时，取最靠前的那个。
+  // communication 排在 constraints 前，是为了让「回答简短点，不要废话」落到表达习惯而不是红线；
+  // goals 排在 work 前，是为了让「计划明年上线产品」落到目标而不是职业。
+  ['communication', /(回答|回复|语气|措辞|表达|沟通|先给结论|给结论|表格|清单|简短|详细一点|不要废话)/],
+  ['constraints', /(必须|不要|不能|禁止|一律|绝对|绝不|不许|务必|只能|红线|底线|不希望|别让|别再)/],
+  ['taste', /(审美|风格|口味|配色|视觉|界面|设计|品牌|极简|简洁|好看|排版)/],
+  ['habits', /(习惯|每天|每周|总是|通常|一般会|作息|早上|晚上|节奏|小步|备份|整理)/],
+  ['goals', /(目标|计划|打算|正在学|准备|冲刺|竞赛|变现|上线|明年|长期|梦想)/],
+  ['skills', /(熟悉|掌握|精通|会用|擅长|熟练|技术栈|框架|工具链|Python|JavaScript|Node\.?js|C\s*语言|Java|Go|Rust|SQL)/i],
+  ['work', /(在职|工作|职业|岗位|公司|团队|项目|实习|工程师|创业)/],
+  ['identity', /(我是|我叫|我在|我住|来自|岁|本科|硕士|博士|大学|学校|专业|母语|时区|生日)/],
+  ['interests', /(爱好|兴趣|喜欢|游戏|电影|音乐|追剧|运动|健身|摄影|收藏|看球)/],
+  ['social', /(同事|同学|朋友|合作|协作|分享|公开|社群|发布)/],
+]
+const INGEST_BOILERPLATE = /^[（(【\[]?(以下|根据|据我|我了解|我掌握|目前|暂时|暂无|没有(相关|更多)?信息|无法(确认|判断)|作为\s*AI|以上|总共|总结)/
+const INGEST_HEDGE = /(可能|也许|似乎|大概|据说|推测|或许|不一定)/
+const INGEST_RULE = /(必须|不要|不能|禁止|一律|绝对|绝不|不许|务必|只能|不希望|别让|别再)/
+const INGEST_STABLE = /(我是|我在|我习惯|我喜欢|我长期|我从事|我的|我一直)/
+
+function classifyFact(text) {
+  for (const [dim, pattern] of INGEST_PRIORITY) {
+    const hit = text.match(pattern)
+    if (hit !== null) return { dim, keyword: hit[0] }
+  }
+  return null
+}
+
+// 别的 AI 习惯用第二人称（「你是一名本科生」），画像里统一成「用户…」：
+// 注入 prompt 时主语错位会让模型把自己当成被描述对象。
+const normalizeVoice = (text) => String(text ?? '')
+  .replace(/你的/g, '自己的')
+  .replace(/^您/u, '用户')
+  .replace(/^你(?![们的])/u, '用户')
+
+function splitIngestCandidates(text) {
+  const out = []
+  const push = (raw) => {
+    const line = String(raw ?? '')
+      .replace(/\r/g, '')
+      .replace(/^\s*(?:[-*•·–]|\d+[.)、]|[（(]\d+[）)]|[一二三四五六七八九十]+[、.])\s*/, '')
+      .replace(/\*\*/g, '')
+      .trim()
+    if (line.length < 4 || line.length > 400) return
+    if (line.startsWith('#')) return
+    if (/^[|\-:\s]+$/.test(line)) return
+    if (INGEST_BOILERPLATE.test(line)) return
+    out.push(normalizeVoice(line))
+  }
+  const trimmed = text.trim()
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      const walk = (node) => {
+        if (typeof node === 'string') { node.split('\n').forEach(push); return }
+        if (Array.isArray(node)) { node.forEach(walk); return }
+        if (node !== null && typeof node === 'object') Object.values(node).forEach(walk)
+      }
+      walk(JSON.parse(trimmed))
+      return out
+    } catch { /* 不是合法 JSON，退回纯文本处理 */ }
+  }
+  for (const line of trimmed.split('\n')) {
+    // 别的 AI 常把一段话写成一行，按中文句读再切一刀
+    if (line.length > 120) line.split(/(?<=[。！？；])/).forEach(push)
+    else push(line)
+  }
+  // 一句话里塞了两件事（「习惯晚上工作，通常先给结论」）：按逗号切开后若分别归到不同大类，
+  // 就拆成两条 —— 否则整句只会落进优先级最高的那一类，另一半信息丢掉。
+  const refined = []
+  for (const line of out) {
+    const parts = line.split(/[，,；;]/).map((part) => part.trim()).filter((part) => part.length >= 6)
+    if (line.length >= 18 && parts.length >= 2) {
+      const dims = parts.map((part) => classifyFact(part)?.dim).filter(Boolean)
+      if (new Set(dims).size >= 2) {
+        // 拆出来的后半段常常没有主语、还带个连接词（「也不能删自己的数据」）：
+        // 去掉连接词并补上「用户」，否则单独看像半句话。
+        parts.forEach((part) => {
+          const body = part.replace(/^(也|还|并且|而且|同时|另外|但|但是|不过|却)/u, '').trim()
+          const withSubject = /^(用户|我)/u.test(body) ? body : `用户${body}`
+          if (withSubject.length >= 4) refined.push(withSubject)
+        })
+        continue
+      }
+    }
+    refined.push(line)
+  }
+  return refined
+}
+
+function ingestWeight(text, dim, corroboration) {
+  let weight = 0.55
+  const reasons = []
+  const rule = INGEST_RULE.test(text)
+  if (rule) { weight += 0.15; reasons.push('硬性要求 +0.15') }
+  if (INGEST_STABLE.test(text)) { weight += 0.1; reasons.push('稳定特征 +0.10') }
+  if (corroboration > 1) { weight += 0.05; reasons.push(`同批佐证 ×${corroboration} +0.05`) }
+  if (INGEST_HEDGE.test(text)) { weight -= 0.12; reasons.push('措辞含糊 −0.12') }
+  if (dim === 'constraints' && rule) weight = Math.max(weight, 0.85)
+  weight = Math.min(0.85, Math.max(0.35, Number(weight.toFixed(2))))
+  return { weight, reasons, core: dim === 'constraints' && rule }
+}
+
+function cmdIngest({ flags }) {
+  const config = loadConfig()
+  const sourceLabel = typeof flags.source === 'string' && flags.source.trim().length > 0
+    ? flags.source.trim()
+    : 'other-ai'
+  let text = ''
+  if (typeof flags.file === 'string') {
+    if (!existsSync(flags.file)) die(`读不到文件：${flags.file}`)
+    text = readFileSync(flags.file, 'utf8')
+  } else if (typeof flags.text === 'string') {
+    text = flags.text
+  } else {
+    die('缺少输入：--file <path>（把别的 AI 的答复另存为 txt）或 --text "整段答复"')
+  }
+  const candidates = splitIngestCandidates(text)
+  if (candidates.length === 0) {
+    die('没识别到可用的陈述：至少要有一行像「我是……」「我习惯……」「不要……」这样的话')
+  }
+  const existing = readJsonl(p('declarations.jsonl'))
+  const accepted = []
+  const skipped = { privacy: [], unclassified: [], session: [], duplicate: [], known: [] }
+  const seen = new Set()
+  for (const raw of candidates) {
+    if (blockedPrivacy(raw).length > 0) { skipped.privacy.push(raw); continue }
+    const cleaned = redactWithCount(raw, config)
+    const fact = cleaned.text.slice(0, 400)
+    if (TASK_SCOPED_HINTS.test(fact)) { skipped.session.push(fact); continue }
+    const cls = classifyFact(fact)
+    if (cls === null) { skipped.unclassified.push(fact); continue }
+    // 已经有一条意思相近的 → 复用它的 key，导入时会并进那一条而不是再加一条同义条目
+    const near = existing.filter((row) => row?.dim === cls.dim && similarity(row?.fact ?? '', fact) >= 0.45)
+    const key = near.length > 0 && typeof near[0]?.key === 'string' ? near[0].key : `${cls.dim}.${factKey(fact)}`
+    const signature = `${cls.dim}|${key}|${normText(fact)}`
+    if (seen.has(signature)) { skipped.duplicate.push(fact); continue }
+    seen.add(signature)
+    if (existing.some((row) => row?.dim === cls.dim && similarity(row?.fact ?? '', fact) >= 0.75)) {
+      skipped.known.push(fact)
+      continue
+    }
+    accepted.push({ dim: cls.dim, key, fact, keyword: cls.keyword, redactions: cleaned.hits })
+  }
+  // 先统计同批佐证次数，再统一算权重 —— 结果与处理顺序无关
+  const buckets = new Map()
+  for (const item of accepted) {
+    const bucket = `${item.dim}|${item.key}`
+    buckets.set(bucket, (buckets.get(bucket) ?? 0) + 1)
+  }
+  for (const item of accepted) {
+    const scored = ingestWeight(item.fact, item.dim, buckets.get(`${item.dim}|${item.key}`) ?? 1)
+    item.weight = scored.weight
+    item.reasons = scored.reasons
+    item.core = scored.core
+  }
+  const groups = new Map()
+  for (const item of accepted) {
+    if (!groups.has(item.dim)) groups.set(item.dim, [])
+    groups.get(item.dim).push(item)
+  }
+  const report = [`来源：${sourceLabel}　候选 ${candidates.length} 条 → 可写入 ${accepted.length} 条`]
+  for (const [dim, items] of groups) {
+    report.push(`\n## ${DIMENSION_LABELS[dim] ?? dim}（${items.length} 条）`)
+    for (const item of items) {
+      const marks = [item.core ? '核心' : '', item.redactions > 0 ? `已脱敏 ${item.redactions} 处` : '']
+        .filter(Boolean).join(' · ')
+      report.push(`- [${item.weight.toFixed(2)}] ${item.fact}${marks.length > 0 ? `（${marks}）` : ''}`)
+      const why = [...item.reasons, `命中「${item.keyword}」`].join('，')
+      report.push(`    依据：${why}`)
+    }
+  }
+  const skipLines = []
+  if (skipped.known.length > 0) skipLines.push(`already:${skipped.known.length}`)
+  const describe = (label, list) => {
+    if (list.length === 0) return
+    const head = list.slice(0, 2).map((line) => line.length > 28 ? `${line.slice(0, 28)}…` : line).join('／')
+    report.push(`- ${label} ${list.length} 条：${head}${list.length > 2 ? ' 等' : ''}`)
+  }
+  if (skipLines.length > 0 || skipped.privacy.length + skipped.unclassified.length + skipped.session.length + skipped.duplicate.length + skipped.known.length > 0) {
+    report.push('\n## 跳过的条目')
+    describe('画像里已有（相似度 ≥75%）', skipped.known)
+    describe('疑似隐私，不收录', skipped.privacy)
+    describe('本次任务细节，不收录', skipped.session)
+    describe('同批重复', skipped.duplicate)
+    describe('无法归类', skipped.unclassified)
+  }
+  const plan = report.join('\n')
+  if (flags.apply !== true) {
+    process.stdout.write(`${plan}\n\n（预览：确认无误后加 --apply 才会写进 declarations.jsonl）\n`)
+    return
+  }
+  if (accepted.length === 0) {
+    process.stdout.write(`${plan}\n\n没有需要写入的条目。\n`)
+    return
+  }
+  snapshotDeclarations('ingest')
+  const at = nowIso()
+  for (const item of accepted) {
+    appendJsonl(p('declarations.jsonl'), {
+      id: newId('dcl'),
+      at,
+      dim: item.dim,
+      key: item.key,
+      fact: item.fact,
+      source: 'model',
+      confidence: item.weight,
+      core: item.core === true,
+      scope: 'global',
+      provenance: {
+        kind: 'import',
+        at,
+        source: sourceLabel,
+        excerpt: item.fact.slice(0, 80),
+      },
+    })
+  }
+  rebuildQuietly()
+  process.stdout.write(`${plan}\n\n已写入 ${accepted.length} 条（来源：${sourceLabel}；画像已刷新）\n`)
+}
+
+
 function cmdObserve({ flags }) {
   const config = loadConfig()
   const tools = typeof flags.tools === 'string'
@@ -2840,6 +3069,7 @@ const COMMANDS = {
   edit: cmdEdit,
   merge: cmdMerge,
   import: cmdImport,
+  ingest: cmdIngest,
   dims: cmdDims,
   snapshots: cmdSnapshots,
   restore: cmdRestore,
@@ -2858,7 +3088,7 @@ const COMMANDS = {
 // 并发时后写的一方会把前一方刚加的记录覆盖掉（这正是丢记录的元凶）。
 // 追加型命令（declare/observe）也一并加锁：否则它可能恰好插在别人「读」和「写回」之间，
 // 追加的那条会被整表写回抹掉——这正是实测丢 3 条声明的现场。
-const MUTATING = new Set(['declare', 'observe', 'build', 'review', 'forget', 'edit', 'merge', 'import', 'dims', 'set', 'reset', 'restore', 'validate', 'redact'])
+const MUTATING = new Set(['declare', 'observe', 'build', 'review', 'forget', 'edit', 'merge', 'import', 'dims', 'set', 'reset', 'restore', 'validate', 'redact', 'ingest'])
 
 function main() {
   const { positional, flags } = parseArgs(process.argv.slice(2))
@@ -2880,3 +3110,10 @@ function main() {
 }
 
 main()
+
+
+
+
+
+
+

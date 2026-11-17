@@ -177,6 +177,23 @@ window.__ModuleLoader__.load({
       fieldHint: { fontSize: '10px', color: T.caption, lineHeight: 1.5 },
       grid2: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '10px' },
       note: { fontSize: '11px', color: T.label3, lineHeight: 1.65 },
+      // 批量粘贴框：等宽字体更接近「别人给你的原文」，也方便用户自己检查
+      ingestBox: {
+        width: '100%',
+        boxSizing: 'border-box',
+        minHeight: '132px',
+        marginTop: '8px',
+        font: 'inherit',
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+        fontSize: '12px',
+        lineHeight: 1.7,
+        padding: '10px 12px',
+        borderRadius: '8px',
+        border: `1px solid ${T.border2}`,
+        background: 'transparent',
+        color: T.label1,
+        resize: 'vertical',
+      },
       notice: { fontSize: '12px', color: T.label2, whiteSpace: 'pre-wrap', padding: '8px 12px', borderRadius: '8px', background: T.layer2 },
       warnLine: { fontSize: '12px', color: T.warn, whiteSpace: 'pre-wrap' },
       empty: { fontSize: '12px', color: T.label3, padding: '18px 0', lineHeight: 1.7 },
@@ -918,6 +935,9 @@ window.__ModuleLoader__.load({
       const [snapArmed, setSnapArmed] = React.useState('')
       const [showAllSnaps, setShowAllSnaps] = React.useState(false)
       const [davDir, setDavDir] = React.useState('')
+      const [ingestText, setIngestText] = React.useState('')
+      const [ingestSource, setIngestSource] = React.useState('')
+      const [ingestOut, setIngestOut] = React.useState('')
     const [encBackup, setEncBackup] = React.useState(false)
       const snapshots = Array.isArray(data.snapshots) ? data.snapshots : []
       const visibleSnaps = showAllSnaps ? snapshots : snapshots.slice(0, 5)
@@ -931,7 +951,53 @@ window.__ModuleLoader__.load({
         ['智能提取（模型）', caps.llm],
         ['模块加载', caps.loader],
       ]
+      const doIngest = async (apply) => {
+        setIngestOut('')
+        const result = await run({
+          action: 'ingest',
+          text: ingestText,
+          source: ingestSource.trim().length > 0 ? ingestSource.trim() : 'other-ai',
+          apply,
+        }, { silent: true })
+        if (result?.ok === false) {
+          setIngestOut(String(result.error ?? '导入没有成功，原因见上方提示'))
+          return
+        }
+        setIngestOut(String(result?.output ?? ''))
+        if (apply === true) { setIngestText('') }
+      }
       return h('div', { style: styles.wrap },
+        h(Section, {
+          title: '从别的 AI 搬回来',
+          extra: h('span', { style: styles.meta }, '逐条切开 · 自动归类 · 自动定权重'),
+        },
+          h('div', { style: styles.note }, '去任何 AI 那里问一句「你掌握了关于我的什么信息」，把答复整段贴进来。这里会按行切开、归到十个大类、按「硬性要求 / 稳定特征 / 同批佐证 / 措辞含糊」自动打权重；先看预览，确认无误再导入。二手来源最高 0.85，不会盖过你自己说过的话。'),
+          h('div', { style: styles.formRow },
+            h('input', {
+              style: { ...styles.input, minWidth: '240px' },
+              placeholder: '来源，例如 ChatGPT / 豆包 / Kimi（会写进溯源）',
+              value: ingestSource,
+              onChange: (e) => setIngestSource(e.target.value),
+            })),
+          h('textarea', {
+            style: styles.ingestBox,
+            placeholder: '- 你是一名本科生\n- 你希望回答简短，不要废话\n- 你不希望别人改你的项目文件夹',
+            value: ingestText,
+            rows: 6,
+            onChange: (e) => setIngestText(e.target.value),
+          }),
+          h('div', { style: styles.formRow },
+            h(Btn, {
+              onClick: () => { void doIngest(false) },
+              disabled: busy === true || ingestText.trim().length === 0,
+            }, '先看看怎么归类'),
+            h(Btn, {
+              tone: 'primary',
+              onClick: () => { void doIngest(true) },
+              disabled: busy === true || ingestText.trim().length === 0,
+            }, '确认导入')),
+          ingestOut.length === 0 ? null : h('pre', { style: styles.diagBox }, ingestOut),
+        ),
         h(Section, {
           title: '宿主能力',
           extra: h('span', { style: styles.meta }, caps === undefined || caps === null ? '还没有记录' : `记录于 ${relTime(caps.at)} · node ${caps.node ?? '?'}`),
@@ -1206,3 +1272,4 @@ window.__ModuleLoader__.load({
     return module.exports
   },
 })
+

@@ -198,6 +198,40 @@ node bin/profile.mjs health --json
 `build` 预渲染 `inject.md`，三段顺序写死：**红线与硬要求 → 个性化首选 → 背景参考**，共用一个绝对预算、先写先得。
 没有分段百分比帽（旧版给红线 40%、个性化 75%，结果是红线先被裁）。设 `inject.maxChars` 为正数才按优先级截断，并在末尾说明「另有 N 条被 topK 限制在外；设 0 可全部带入」。
 
+## 从别的 AI 搬回来（v24）
+
+换工具的时候最烦的一件事：新助手对你一无所知。而旧的那个其实已经攒了一堆关于你的判断。
+
+去问它一句「**你掌握了关于我的什么信息**」，把它给出的答复整段复制过来：
+
+```bash
+# 先看它会被怎么归类、给多少权重（不写库）
+dsh-profile ingest --file chatgpt-about-me.txt --source ChatGPT
+
+# 看清楚了再落库
+dsh-profile ingest --file chatgpt-about-me.txt --source ChatGPT --apply
+```
+
+面板里也有入口：**备份与重置 → 从别的 AI 搬回来**，粘进去、点「先看看怎么归类」。
+
+### 它是怎么处理的
+
+| 环节 | 做法 | 为什么 |
+| --- | --- | --- |
+| 切分 | 按行、按列表符号、按中文句读拆；超过 18 字且前后半句归到不同大类的，再拆成两条 | 别的 AI 常把两件事写在一句里（「习惯晚上工作，通常先给结论」） |
+| 去噪 | 丢掉表头、「以上信息仅供参考」这类免责声明、短于 4 字的碎片 | 这些不是画像，是客套 |
+| 归类 | 按固定的十类优先级表匹配关键词，第一条命中的胜出 | 可解释、可复现：报告里会写「命中『不希望』」 |
+| 定权重 | 0.55 起步；硬性要求 +0.15、稳定特征 +0.10、同批佐证 +0.05、措辞含糊 −0.12；夹在 0.35–0.85 | 二手转述不该和你亲口说的话同权 |
+| 红线 | 命中硬性要求的约束直接 0.85 并标核心 | 边界比偏好重要 |
+| 隐私 | 证件号 / 银行卡 / 密码 / 精确住址直接拦下不进库；手机号、邮箱、密钥打码后入库 | 「记着他有身份证号」本身没有画像价值 |
+| 去重 | 与现有条目相似度 ≥75% 视为已有；45%–75% 复用它的 key，导入时并进那一条 | 避免同一件事攒出五条同义条目 |
+
+每条写入都带溯源：`provenance.kind = "import"`、`source = 你填的工具名`、`excerpt = 原句前 80 字`，面板里能看到「模型提炼 / 你亲口说的」之外多一种来源。
+
+### 一句话概括取舍
+
+搬回来的是**别人的判断**，不是你的原话。所以它默认权重上限 0.85、导入前必须先看预览、写错了能整批还原（导入前自动留快照）。觉得某条不准，直接在面板里改权重或删掉。
+
 ## MCP：让别的宿主也用同一份画像（v15）
 
 ```json
@@ -207,7 +241,7 @@ node bin/profile.mjs health --json
 } } }
 ```
 
-十个工具：`profile_get` / `profile_status` / `profile_search` / `profile_declare` / `profile_forget` / `profile_set_weight` / `profile_review` / `profile_validate` / `profile_backup` / `profile_set`；两个资源：`user-profile://portrait`、`user-profile://declarations`。
+十一个工具：`profile_get` / `profile_status` / `profile_search` / `profile_declare` / `profile_ingest` / `profile_forget` / `profile_set_weight` / `profile_review` / `profile_validate` / `profile_backup` / `profile_set`；两个资源：`user-profile://portrait`、`user-profile://declarations`。
 stdio + 行分隔 JSON-RPC 2.0，**stdout 只走协议、日志全走 stderr**。每个工具都是「参数 → 调 CLI → 回文本」的薄封装，所以不存在 MCP 版与 CLI 版行为不一致。
 
 ## WebDAV 备份（v15）
@@ -332,6 +366,8 @@ node _audit2.mjs              # 34 项往返与极限（导出→重置→导入
 node _audit3.mjs              # 51 项逻辑一致性（预算与排序 / 闸门顺序 / MCP 协议 / 面板自洽）
 node _audit4.mjs              # 22 项兼容层自身（能力文件 / doctor / 别名事件 / 降级不崩 / 旧配置迁移）
 node _audit5.mjs              # 31 项「两处说法不一致」（settings↔set / 计数自洽 / health 语义 / explain 语义）
+node _audit6.mjs              # 25 项输入形状与协议错误路径（空查询 / 未来时间戳 / 加密往返 / MCP 错误码）
+node _audit7.mjs              # 25 项「从别的 AI 搬回画像」（预览不写库 / 归类优先级 / 拆句 / 隐私 / 去重 / 溯源）
 node _compat.mjs              # 11 项残缺宿主（只有 ctx.on / 缺 pre-step / 无 ctx.on / 无 next / 旧事件名）
 node _render.mjs             # 面板渲染烟测：7 个页签逐个点 + payload 洁净度
 node scripts/verify-install.mjs   # 13 项安装体检（不重启、不起 dsh）
@@ -365,3 +401,4 @@ node scripts/verify-install.mjs   # 13 项安装体检（不重启、不起 dsh�
 
 已知限制：面板路由的鉴权交给宿主 `connection.requestRejection`；本机 loopback 请求该钩子返回 undefined（放行），
 因此**不额外要求会话 cookie**。仅绑定本机端口的单用户场景下可接受，若要收紧需在宿主侧加 token 校验。
+

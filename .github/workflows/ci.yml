@@ -25,6 +25,7 @@ jobs:
           node --check index.js
           node --check client.js
           node --check bin/profile.mjs
+          node --check mcp/server.mjs
           node --check _selftest.mjs
           node --check _e2e.mjs
           node --check _audit.mjs
@@ -32,13 +33,16 @@ jobs:
           node --check _audit3.mjs
           node --check _audit4.mjs
           node --check _audit5.mjs
+          node --check _audit6.mjs
+          node --check _audit7.mjs
           node --check _compat.mjs
           node --check _render.mjs
+          node --check _qa-frames.mjs
 
       - name: Unit tests (storage / conflicts / injection)
         run: node _selftest.mjs
 
-      - name: Adversarial audit
+      - name: Adversarial audit 1 (edges: dirty input / lock / scope)
         run: node _audit.mjs
 
       - name: Adversarial audit 2 (corruption / round-trip / limits)
@@ -46,8 +50,21 @@ jobs:
 
       - name: Adversarial audit 3 (logic: budget / gates / MCP / panel consistency)
         run: node _audit3.mjs
-          node _audit4.mjs
-          node _compat.mjs
+
+      - name: Adversarial audit 4 (compat layer: caps file / doctor / event aliases)
+        run: node _audit4.mjs
+
+      - name: Adversarial audit 5 (settings ↔ set drift / health / explain)
+        run: node _audit5.mjs
+
+      - name: Adversarial audit 6 (input shapes / encryption / protocol errors)
+        run: node _audit6.mjs
+
+      - name: Adversarial audit 7 (ingest from another AI)
+        run: node _audit7.mjs
+
+      - name: Degraded host matrix
+        run: node _compat.mjs
 
       - name: Panel render smoke test
         run: node _render.mjs
@@ -55,4 +72,6 @@ jobs:
       # _e2e.mjs 的 HTTP 段需要运行中的宿主；CI 只跑纯 CLI 段
       - name: End-to-end (CLI only)
         run: node _e2e.mjs --cli-only
-        continue-on-error: false
+
+      - name: Install health check
+        run: node scripts/verify-install.mjs

@@ -16,8 +16,9 @@
  * 也就不存在「MCP 版和 CLI 版行为不一致」这种经典毛病。
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { createInterface } from 'node:readline'
@@ -131,6 +132,19 @@ const TOOLS = [
     name: 'profile_validate',
     description: '体检：逐条检查画像条目是否「绝对有效」（结构、维度、置信度、是否本次任务细节）。只报告，不改数据。',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'profile_ingest',
+    description: '把别的 AI 的「你掌握了我什么」答复整段贴进来：逐条切分、按大类归类、自动定权重。默认只预览，apply=true 才写入。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: '整段答复原文' },
+        source: { type: 'string', description: '来源工具名，例如 ChatGPT / 豆包（写进溯源）' },
+        apply: { type: 'boolean', description: 'true 才真正写入；默认 false 只返回分类与权重预览' },
+      },
+      required: ['text'],
+    },
   },
   {
     name: 'profile_backup',
@@ -249,6 +263,22 @@ function callTool(name, args = {}) {
   if (name === 'profile_validate') {
     const result = runCli(['validate'])
     return result.ok ? okText(result.text) : errText(result.text)
+  }
+
+  if (name === 'profile_ingest') {
+    const text = String(args.text ?? '')
+    if (text.trim().length === 0) return errText('缺少 text')
+    const source = String(args.source ?? 'other-ai').slice(0, 40)
+    const file = join(tmpdir(), `agent-user-profile-ingest-${Date.now()}-${process.pid}.txt`)
+    writeFileSync(file, text, 'utf8')
+    try {
+      const argv = ['ingest', '--file', file, '--source', source]
+      if (args.apply === true) argv.push('--apply')
+      const result = runCli(argv, { timeoutMs: 30000 })
+      return result.ok ? okText(result.text) : errText(result.text)
+    } finally {
+      try { unlinkSync(file) } catch { /* 临时文件清不掉不影响结果 */ }
+    }
   }
 
   if (name === 'profile_backup') {
@@ -389,3 +419,5 @@ function main() {
 }
 
 main()
+
+

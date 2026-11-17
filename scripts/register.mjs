@@ -37,6 +37,8 @@ const SYNC = [
   'scripts/build-trailer.ps1',
   'scripts/tts.py',
   '_qa-frames.mjs',
+  '_audit7.mjs',
+  'docs/CHANGES-v24.md',
   'docs/CHANGES-v23.md',
   '_compat.mjs',
   'docs/COMPATIBILITY.md',
@@ -136,4 +138,5 @@ for (const name of profiles) {
       : `  ln -s "${TARGET}" "${link}"`)
   }
 }
+
 

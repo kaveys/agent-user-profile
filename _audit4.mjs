@@ -189,7 +189,9 @@ const fakeCtx = (opts = {}) => {
   const lines = proc.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line))
   const list = lines.find((r) => r.id === 2)
   const bad = lines.find((r) => r.id === 3)
-  check('MCP tools/list 仍是 10 个工具', (list?.result?.tools ?? []).length === 10, String((list?.result?.tools ?? []).length))
+  const toolNames = (list?.result?.tools ?? []).map((tool) => tool.name)
+  check('MCP tools/list 暴露 11 个工具', toolNames.length === 11, String(toolNames.length))
+  check('MCP 提供 profile_ingest（从别的 AI 搬回画像）', toolNames.includes('profile_ingest'), toolNames.join(','))
   check('MCP 未知工具返回 -32602', bad?.error?.code === -32602, JSON.stringify(bad?.error ?? {}))
   rmSync(dir, { recursive: true, force: true })
 }
@@ -233,3 +235,4 @@ if (failed > 0) {
   process.exit(1)
 }
 console.log('第四轮排查：全部通过')
+
