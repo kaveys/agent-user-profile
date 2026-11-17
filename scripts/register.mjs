@@ -38,6 +38,8 @@ const SYNC = [
   'scripts/tts.py',
   '_qa-frames.mjs',
   '_audit7.mjs',
+  '_audit8.mjs',
+  'docs/CHANGES-v25.md',
   'docs/CHANGES-v24.md',
   'docs/CHANGES-v23.md',
   '_compat.mjs',

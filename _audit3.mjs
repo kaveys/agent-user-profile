@@ -94,9 +94,9 @@ cli('init')
   check('超长事实被截到 400 字并提示', tooLong.code === 0 && [...longRow.fact].length <= 401 && /超过 400 字/.test(tooLong.out), `${[...longRow.fact].length} 字`)
 
   const countA = readLines('declarations.jsonl').length
-  cli('declare', '--dim', 'taste', '--fact', '我喜欢深色界面')
+  cli('declare', '--dim', 'taste', '--fact', '我喜欢深色界面', '--no-merge')
   const countB = readLines('declarations.jsonl').length
-  cli('declare', '--dim', 'taste', '--fact', '我喜欢深色界面')
+  cli('declare', '--dim', 'taste', '--fact', '我喜欢深色界面', '--no-merge')
   const countC = readLines('declarations.jsonl').length
   check('同一句话重复声明是更新而不是新增', countB === countA + 1 && countC === countB, `${countA} → ${countB} → ${countC}`)
 
@@ -140,7 +140,7 @@ cli('init')
   const corruptBackups = readdirSync(HOME).filter((n) => n.includes('.corrupt-'))
   check('config.json 损坏后仍能工作（按默认重建）', statusBroken.code === 0 && /注意/.test(statusBroken.out), statusBroken.out.split('\n').find((l) => l.includes('注意')) ?? 'no warn')
   check('损坏的配置被备份成 .corrupt-*', corruptBackups.length > 0, corruptBackups.join(','))
-  check('重建后的配置是合法的 schemaVersion 5', readJson('config.json').schemaVersion === 5)
+  check('重建后的配置是合法的 schemaVersion 6', readJson('config.json').schemaVersion === 6)
 
   // 并发写
   const before = readLines('declarations.jsonl').length

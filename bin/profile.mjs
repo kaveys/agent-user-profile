@@ -174,7 +174,7 @@ function classifyLegacy(record) {
 }
 
 const DEFAULT_CONFIG = {
-  schemaVersion: 5,
+  schemaVersion: 6,
   // 默认叠加开关：true = 每次任务前注入画像
   enabled: true,
   inject: {
@@ -238,8 +238,9 @@ const DEFAULT_CONFIG = {
     autoBuildMinIntervalMs: 60000,
     // 同维度近似去重：模型换着 key 重述同一件事时，靠相似度合并，避免画像越用越肿
     dedupe: true,
-    // 0.45 的由来：实测同义改写的两条偏好相似度 0.462，而不相关的两条只有 0.31。
-    similarityThreshold: 0.45,
+    // 0.35 的由来：实测同义改写（换了说法、加了主语）的 mergeScore 落在 0.38–0.67，
+    // 而不相关的两条最高只有 0.14 —— 阈值放在这段空隙里，两边都留足余量。
+    similarityThreshold: 0.35,
     // 早期版本会把「常用工具占比 / 单轮平均工具调用 / 活跃时段」当成画像条目写进去。
     // 那是 Agent 自己的运行统计，不是用户是谁 —— 界面上看着像画像，读起来全是噪音，
     // 所以默认不再产出；原始记录仍留在 observations/，只供内部判断「证据够不够」。
@@ -581,6 +582,11 @@ function loadConfig() {
       }
     }
   }
+  // v6：合并阈值从 0.45 下调到 0.35（实测同义改写 ≥0.38、不相关 ≤0.14）。
+  // 老配置里的 0.45 是我们自己的旧默认值，不是用户选的，不清掉新默认永远不生效。
+  if (rawVersion < 6) {
+    if (Number(merged.build?.similarityThreshold) === 0.45) merged.build.similarityThreshold = 0.35
+  }
   migrateConfig(file, raw, merged)
   return merged
 }
@@ -870,6 +876,50 @@ function cmdDeclare({ flags }) {
     return
   }
 
+  // 换着说法的同义条目：不问就合并。判据是 mergeScore（原句相似 / 一方被包含 / 去主语后相似），
+  // 同大类用 similarityThreshold，跨大类要 ≥0.8 —— 跨类只在几乎一字不差时合并，
+  // 否则「习惯里要简洁」和「口味上偏好简洁」会被揉成一条，反而丢掉分类信息。
+  // 合并保留信息更全的正文（几乎完全包含时取长的那条），权重取最高，其余原文进 mergedFrom。
+  if (flags['no-merge'] !== true) {
+    const rows = readJsonl(targetFile)
+    const threshold = Number.isFinite(Number(config.build?.similarityThreshold))
+      ? Number(config.build.similarityThreshold)
+      : 0.35
+    const twin = rows.find((row) => {
+      if (row === existing || typeof row?.fact !== 'string') return false
+      if (row.id === record.id) return false
+      if (flags.pending === true) return false
+      // 同一个 key 下的不同说法属于「同名覆盖」，由 conflicts/history 记痕迹，
+      // 不能被相似合并悄悄吞掉（否则「偏好深色 → 偏好浅色」会变成一条，还看不出改过）。
+      if (row.dim === record.dim && (row.key ?? '') === (record.key ?? '')) return false
+      const sameDim = row.dim === record.dim
+      const limit = sameDim ? threshold : Math.max(0.8, threshold + 0.3)
+      return mergeScore(row.fact, record.fact) >= limit
+    })
+    if (twin !== undefined) {
+      // 正文取「更可信的那条」的措辞：权重代表可信度，不是长度。
+      // 例外是一条几乎被另一条完全包含（≥0.92）时取长的那条 —— 长的信息更全。
+      const byTrust = Number(record.confidence) >= Number(twin.confidence ?? 0) ? record.fact : twin.fact
+      const containMax = Math.max(coverage(twin.fact, record.fact), coverage(record.fact, twin.fact))
+      const mergedFact = containMax >= 0.92
+        ? (String(record.fact).length >= String(twin.fact).length ? record.fact : twin.fact)
+        : byTrust
+      const kept = {
+        ...twin,
+        fact: mergedFact,
+        confidence: Math.max(Number(twin.confidence ?? 0), record.confidence),
+        core: twin.core === true || record.core === true,
+        at: record.at,
+        editedAt: record.at,
+        mergedFrom: [...(twin.mergedFrom ?? []), { id: record.id, dim: record.dim, fact: record.fact, at: record.at }],
+      }
+      writeJsonl(targetFile, rows.map((row) => (row.id === twin.id ? kept : row)))
+      if (flags.pending !== true) rebuildQuietly()
+      process.stdout.write(`已合并到已有条目 [${kept.dim}] ${kept.fact}\n（原句「${record.fact}」记进 mergedFrom；同义判定 ${mergeScore(twin.fact, record.fact).toFixed(2)}）${clampNote}${redactNote}\n${flags.pending === true ? '' : '（画像已刷新）\n'}`)
+      return
+    }
+  }
+
   if (flags.pending === true) {
     appendJsonl(p('pending.jsonl'), record)
     process.stdout.write(`已加入待审候选 [${dim}] ${record.fact}${clampNote}${redactNote}\n（确认：profile review --accept ${record.id}；或 review --accept all）\n`)
@@ -1019,12 +1069,13 @@ function cmdIngest({ flags }) {
     const cls = classifyFact(fact)
     if (cls === null) { skipped.unclassified.push(fact); continue }
     // 已经有一条意思相近的 → 复用它的 key，导入时会并进那一条而不是再加一条同义条目
-    const near = existing.filter((row) => row?.dim === cls.dim && similarity(row?.fact ?? '', fact) >= 0.45)
+    // （0.35 是阈值；mergeScore 还会算「被整体包含」和「去主语后相似」，同义改写更容易被认出来）
+    const near = existing.filter((row) => row?.dim === cls.dim && mergeScore(row?.fact ?? '', fact) >= 0.35)
     const key = near.length > 0 && typeof near[0]?.key === 'string' ? near[0].key : `${cls.dim}.${factKey(fact)}`
     const signature = `${cls.dim}|${key}|${normText(fact)}`
     if (seen.has(signature)) { skipped.duplicate.push(fact); continue }
     seen.add(signature)
-    if (existing.some((row) => row?.dim === cls.dim && similarity(row?.fact ?? '', fact) >= 0.75)) {
+    if (existing.some((row) => row?.dim === cls.dim && mergeScore(row?.fact ?? '', fact) >= 0.75)) {
       skipped.known.push(fact)
       continue
     }
@@ -1252,6 +1303,119 @@ function similarity(a, b) {
   return (2 * hit) / (gx.length + grams(y).length)
 }
 
+/**
+ * 覆盖率：短的那条有多少被长的那条「讲到了」。
+ * Dice 对长度差敏感（短句套在长句里也只得 0.4），而「一句话被另一句整体包含」恰恰是最该合并的情形。
+ */
+function coverage(a, b) {
+  const x = normText(a)
+  const y = normText(b)
+  if (x.length === 0 || y.length === 0) return 0
+  if (x === y) return 1
+  const [short, long] = x.length <= y.length ? [x, y] : [y, x]
+  if (short.length < 4) return 0 // 太短的句子字面容易撞，交给 similarity
+  const grams = (s) => {
+    const out = []
+    for (let i = 0; i < s.length - 1; i += 1) out.push(s.slice(i, i + 2))
+    return out
+  }
+  const pool = new Map()
+  for (const g of grams(long)) pool.set(g, (pool.get(g) ?? 0) + 1)
+  const gs = grams(short)
+  let hit = 0
+  for (const g of gs) {
+    const n = pool.get(g) ?? 0
+    if (n > 0) {
+      hit += 1
+      pool.set(g, n - 1)
+    }
+  }
+  return gs.length === 0 ? 0 : hit / gs.length
+}
+
+/** 合并判定统一用它：字面相似或「被整体包含」都算同义。 */
+function similarScore(a, b) {
+  return Math.max(similarity(a, b), coverage(a, b))
+}
+
+/**
+ * 去掉主语与情态词后再比一次：「用户要求界面简洁」和「界面要简洁」是同一件事，
+ * 但字面 Dice 只有 0.4 左右 —— 中文短句里主语占的比重大，不剥掉永远判不相似。
+ */
+const SUBJECT_PREFIX = /^(?:用户|我|本人|该用户|对方)(?:要求|希望|想要|需要|习惯|喜欢|是|在|的|会)?/gu
+const stemText = (text) => normText(text).replace(SUBJECT_PREFIX, '')
+
+/** 综合判定：原句相似 / 一方被另一方包含 / 去主语后相似，取最大。 */
+function mergeScore(a, b) {
+  // 数字是有意义的信息（班级、年份、版本、数量）：两句只有数字不同就不再算同义。
+  // 否则「并发写入第 1 条」和「第 2 条」、「262 班」和「263 班」会被并成一条。
+  const nums = (text) => (String(text ?? '').match(/\d+/g) ?? []).sort().join(',')
+  if (nums(a) !== nums(b) && (nums(a).length > 0 || nums(b).length > 0)) return 0
+  const direct = similarScore(a, b)
+  if (direct >= 1) return 1
+  const stemA = stemText(a)
+  const stemB = stemText(b)
+  if (stemA.length < 4 || stemB.length < 4) return direct
+  return Math.max(direct, similarScore(stemA, stemB))
+}
+
+/**
+ * 主动合并相似条目：同一大类内按 mergeScore 判定，跨大类只在字面几乎相同（≥0.8）时合并，
+ * 避免把「习惯」和「口味」里措辞相近但含义不同的两条搅在一起。
+ * 被并入的那条进 history（mergedAs='duplicate'），不删原文，可追溯。
+ */
+function findMergeGroups(items, config) {
+  const configuredThreshold = Number(config.build?.similarityThreshold)
+  const threshold = Number.isFinite(configuredThreshold) && configuredThreshold > 0 && configuredThreshold <= 1
+    ? configuredThreshold
+    : 0.35
+  const crossThreshold = Math.max(0.8, threshold + 0.3)
+  const groups = []
+  const taken = new Set()
+  const sorted = [...items].sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
+  for (const base of sorted) {
+    if (taken.has(base.id)) continue
+    const members = [base]
+    for (const other of sorted) {
+      if (other === base || taken.has(other.id)) continue
+      const sameDim = other.dim === base.dim
+      const score = mergeScore(base.text, other.text)
+      const limit = sameDim ? threshold : crossThreshold
+      if (score >= limit) {
+        members.push(other)
+        taken.add(other.id)
+      }
+    }
+    if (members.length > 1) {
+      taken.add(base.id)
+      groups.push({ base, members, score: mergeScore(base.text, members[1].text) })
+    }
+  }
+  return groups
+}
+
+/** 把同组条目合成一条：保留信息量最大的原文，权重取最高，历史逐条留档。 */
+function mergeGroupRecords(group) {
+  const byLength = [...group.members].sort((a, b) => String(b.fact ?? '').length - String(a.fact ?? '').length)
+  const winnerRecord = [...group.members].sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0))[0]
+  const longest = byLength[0]
+  // 若一条几乎被另一条完全包含，用长的那条当正文（信息更全），权重仍取最高
+  const keepText = coverage(winnerRecord.fact, longest.fact) >= 0.92 ? longest.fact : winnerRecord.fact
+  const kept = {
+    ...winnerRecord,
+    fact: keepText,
+    confidence: Math.max(...group.members.map((m) => Number(m.confidence ?? 0))),
+    core: group.members.some((m) => m.core === true) ? true : winnerRecord.core,
+    at: new Date().toISOString(),
+    editedAt: new Date().toISOString(),
+    mergedFrom: [
+      ...(winnerRecord.mergedFrom ?? []),
+      ...group.members.filter((m) => m !== winnerRecord).map((m) => ({ id: m.id, dim: m.dim, fact: m.fact })),
+    ],
+  }
+  return kept
+}
+
 function buildDimensions(declarations, observed, config) {
   const dimensions = {}
   for (const dim of config.dimensions) {
@@ -1339,45 +1503,73 @@ function buildDimensions(declarations, observed, config) {
     bucket('habits').items.push({ ...item, dim: 'habits' })
   }
 
-  // 同维度去重：模型每轮都可能用不同 key 重述同一件事，不合并画像会越用越肿。
-  // 只留权重最高的那条，其余进 history 并记 status='merged'，不丢证据。
+  // 同义合并：模型每轮都可能换着说法重述同一件事，不合并画像会越用越肿。
+  // 用「字面相似 或 被整体包含」判定（similarScore），并允许跨大类合并（阈值更严），
+  // 因为「关注 AI 工具链」和「折腾 AI 模型、远控工具」本质是同一件事落在两个大类里。
+  // 权重最高的那条当锚，其余进它所属大类的 history 并记 status='merged'，证据不丢。
   if (config.build?.dedupe !== false) {
-    const threshold = Number(config.build?.similarityThreshold ?? 0.45)
+    const threshold = Number(config.build?.similarityThreshold ?? 0.35)
+    const allowCross = config.build?.crossDimMerge !== false
+    const crossBoost = Number(config.build?.crossDimBoost ?? 0.12)
+    const pool = []
     for (const [dim, section] of Object.entries(dimensions)) {
-      const declared = section.items.filter((it) => it.kind === 'declared' && it.frozen !== true)
-      if (declared.length < 2) continue
-      const keep = []
-      for (const item of declared) {
-        const twin = keep.find((k) => similarity(k.text, item.text) >= threshold)
-        if (twin === undefined) {
-          keep.push(item)
-          continue
-        }
-        const winner = (item.weight ?? 0) > (twin.weight ?? 0) ? item : twin
-        const loser = winner === item ? twin : item
-        winner.evidence = [...new Set([...(winner.evidence ?? []), ...(loser.evidence ?? [])])]
-        if (String(loser.firstSeen) < String(winner.firstSeen)) winner.firstSeen = loser.firstSeen
-        keep[keep.indexOf(twin)] = winner
-        section.history.push({
-          id: loser.id,
-          kind: 'declared',
-          key: loser.key,
-          text: loser.text,
-          firstSeen: loser.firstSeen,
-          lastSeen: loser.lastSeen,
-          supersededBy: winner.id,
-          mergedAs: 'duplicate',
-        })
-        conflicts.push({
-          dim,
-          key: winner.key,
-          status: 'merged',
-          rule: `相似度 ≥ ${threshold} 视为同一件事；保留权重更高的那条，另一条进 history`,
-          from: { id: loser.id, text: loser.text, at: loser.lastSeen },
-          to: { id: winner.id, text: winner.text, at: winner.lastSeen },
-        })
+      for (const item of section.items) {
+        if (item.kind === 'declared' && item.frozen !== true) pool.push({ dim, item })
       }
-      section.items = [...keep, ...section.items.filter((it) => it.kind !== 'declared' || it.frozen === true)]
+    }
+    // 先按权重、再按最近出现排序：锚点=最可信的那条
+    pool.sort((a, b) => {
+      const dw = (b.item.weight ?? 0) - (a.item.weight ?? 0)
+      if (dw !== 0) return dw
+      return String(b.item.lastSeen ?? '').localeCompare(String(a.item.lastSeen ?? ''))
+    })
+    const kept = []
+    const losers = []
+    for (const entry of pool) {
+      let twin = kept.find((k) => k.dim === entry.dim && similarScore(k.item.text, entry.item.text) >= threshold)
+      let cross = false
+      if (twin === undefined && allowCross) {
+        twin = kept.find((k) => k.dim !== entry.dim && similarScore(k.item.text, entry.item.text) >= threshold + crossBoost)
+        cross = twin !== undefined
+      }
+      if (twin === undefined) {
+        kept.push(entry)
+        continue
+      }
+      // 排序保证锚点权重不低于后来者；同等权重时保留先到的（更早见过）
+      const winner = twin.item
+      const loser = entry.item
+      winner.evidence = [...new Set([...(winner.evidence ?? []), ...(loser.evidence ?? [])])]
+      winner.mergedFrom = [...(winner.mergedFrom ?? []), { id: loser.id, dim: entry.dim, text: loser.text }]
+      if (String(loser.firstSeen) < String(winner.firstSeen)) winner.firstSeen = loser.firstSeen
+      losers.push({ dim: entry.dim, loser, winner, cross })
+    }
+    for (const { dim, loser, winner, cross } of losers) {
+      const home = bucket(dim)
+      home.history.push({
+        id: loser.id,
+        kind: 'declared',
+        key: loser.key,
+        text: loser.text,
+        firstSeen: loser.firstSeen,
+        lastSeen: loser.lastSeen,
+        supersededBy: winner.id,
+        mergedAs: 'duplicate',
+      })
+      conflicts.push({
+        dim,
+        key: loser.key,
+        status: 'merged',
+        rule: cross
+          ? `跨大类同义（相似度 ≥ ${(threshold + crossBoost).toFixed(2)}）：保留权重更高的「${winner.text.slice(0, 20)}…」，本条进 history`
+          : `相似度 ≥ ${threshold} 视为同一件事；保留权重更高的那条，另一条进 history`,
+        from: { id: loser.id, text: loser.text, at: loser.lastSeen },
+        to: { id: winner.id, text: winner.text, at: winner.lastSeen },
+      })
+    }
+    const droppedIds = new Set(losers.map((l) => l.loser.id))
+    for (const [dim, section] of Object.entries(dimensions)) {
+      section.items = section.items.filter((it) => !(it.kind === 'declared' && droppedIds.has(it.id)))
     }
   }
 
@@ -1957,6 +2149,8 @@ function cmdPanel() {
         autoBuild: config.build.autoBuild !== false,
         autoBuildMinIntervalMs: config.build.autoBuildMinIntervalMs,
         dedupe: config.build.dedupe !== false,
+    autoMergeSemantic: config.build?.autoMergeSemantic !== false,
+    semanticMergeIntervalMs: Number.isFinite(config.build?.semanticMergeIntervalMs) ? config.build.semanticMergeIntervalMs : 1800000,
         similarityThreshold: config.build.similarityThreshold,
         includeObservedItems: config.build.includeObservedItems === true,
       },
@@ -2250,6 +2444,169 @@ function cmdMerge({ flags }) {
   })
   rebuildQuietly()
   process.stdout.write(`已合并：保留「${keep.fact}」，并入「${drop.fact}」\n（画像已刷新）\n`)
+}
+
+/**
+ * 主动合并相似条目（v25）：把「同义但换了说法」的声明并成一条。
+ * 与 build 阶段那次合并的区别：这次会**改写 declarations.jsonl**，
+ * 所以重复条目不会在存储里越积越多（build 的合并只影响产物，源文件不动）。
+ * 默认只预览，加 --apply 才写。
+ */
+function cmdDedupe({ flags }) {
+  const config = loadConfig()
+  const records = readJsonl(p('declarations.jsonl')).filter((r) => typeof r?.fact === 'string' && r.fact.length > 0)
+  if (records.length < 2) {
+    process.stdout.write(`只有 ${records.length} 条声明，没什么可合并的\n`)
+    return
+  }
+  // --pairs：只输出「值得让模型看一眼」的候选对（字面证据不足时，语义判断交给上层）。
+  // 阈值故意放低到 0.18：粗排只负责别让 25 条两两组合都发给模型，判不判是后面的事。
+  if (flags.pairs === true) {
+    const tri = (text) => {
+      const s = normText(text)
+      const out = new Set()
+      for (let i = 0; i + 3 <= s.length; i += 1) out.add(s.slice(i, i + 3))
+      return out
+    }
+    const out = []
+    for (let i = 0; i < records.length; i += 1) {
+      for (let j = i + 1; j < records.length; j += 1) {
+        const a = records[i]
+        const b = records[j]
+        if ((a.key ?? '') === (b.key ?? '')) continue
+        const score = mergeScore(a.fact, b.fact)
+        const sameDim = (a.dim ?? '') === (b.dim ?? '')
+        // 粗排只看「有没有必要让模型看一眼」：字面分够，或至少共享一个三字片段
+        //（「AI 工具链」和「AI 模型、远控工具」字面分很低，但共享「AI 」这类片段，值得判一次）
+        const ta = tri(a.fact)
+        const tb = tri(b.fact)
+        let shared = 0
+        for (const g of ta) if (tb.has(g)) shared += 1
+        const lexical = score >= 0.18 || (shared >= 2 && Math.min(a.fact.length, b.fact.length) >= 8)
+        if (!lexical) continue
+        out.push({
+          a: { id: a.id, dim: a.dim, fact: a.fact, c: Number(a.confidence ?? 0), key: a.key ?? '' },
+          b: { id: b.id, dim: b.dim, fact: b.fact, c: Number(b.confidence ?? 0), key: b.key ?? '' },
+          score: Number(score.toFixed(2)),
+          shared,
+        })
+      }
+    }
+    out.sort((x, y) => (y.score - x.score) || (y.shared - x.shared))
+    process.stdout.write(`${JSON.stringify({ count: out.length, pairs: out.slice(0, 40) }, null, 2)}\n`)
+    return
+  }
+  // --apply-pairs 'id1|id2,id3|id4'：模型判完之后由上层回灌要合并的对。
+  if (typeof flags['apply-pairs'] === 'string' && flags['apply-pairs'].length > 0) {
+    const byId = new Map(records.map((r) => [r.id, r]))
+    const pairs = flags['apply-pairs'].split(',').map((chunk) => chunk.split('|').map((s) => s.trim())).filter((pair) => pair.length === 2)
+    const merges = new Map()
+    let applied = 0
+    for (const [keepId, dropId] of pairs) {
+      const keep = byId.get(keepId)
+      const drop = byId.get(dropId)
+      if (keep === undefined || drop === undefined || merges.has(dropId)) continue
+      const longest = String(drop.fact).length > String(keep.fact).length ? drop.fact : keep.fact
+      const containMax = coverage(keep.fact, drop.fact)
+      const merged = {
+        ...keep,
+        fact: containMax >= 0.92 ? longest : keep.fact,
+        confidence: Math.max(Number(keep.confidence ?? 0), Number(drop.confidence ?? 0)),
+        core: keep.core === true || drop.core === true,
+        at: nowIso(),
+        editedAt: nowIso(),
+        mergedFrom: [...(Array.isArray(keep.mergedFrom) ? keep.mergedFrom : []), { id: drop.id, dim: drop.dim, fact: drop.fact, judged: 'model' }],
+      }
+      merges.set(keep.id, merged)
+      merges.set(drop.id, null)
+      applied += 1
+    }
+    if (applied === 0) die('--apply-pairs 里没有能匹配上的 id 对（用法：--apply-pairs "keepId|dropId,keepId2|dropId2"）')
+    snapshotDeclarations('dedupe')
+    const next = records.map((r) => (merges.has(r.id) ? merges.get(r.id) : r)).filter((r) => r !== null)
+    writeJsonl(p('declarations.jsonl'), next)
+    appendJsonl(p('changelog.jsonl'), { at: nowIso(), kind: 'dedupe-semantic', pairs: applied, before: records.length, after: next.length })
+    rebuildQuietly()
+    process.stdout.write(`已按判定合并 ${applied} 组：${records.length} 条 → ${next.length} 条（画像已刷新）\n`)
+    return
+  }
+  const threshold = Number.isFinite(Number(flags.threshold)) ? Number(flags.threshold) : null
+  const groups = []
+  const taken = new Set()
+  const byWeight = [...records].sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0))
+  for (const base of byWeight) {
+    if (taken.has(base.id)) continue
+    const members = [base]
+    for (const other of byWeight) {
+      if (other === base || taken.has(other.id)) continue
+      // 同 dim + 同 key 的差异是「覆盖/冲突」，交给 conflicts 与 history 记痕迹，
+      // 不该被当成同义合并抹平。
+      if ((other.dim ?? 'taste') === (base.dim ?? 'taste') && (other.key ?? '') === (base.key ?? '')) continue
+      const sameDim = (other.dim ?? 'taste') === (base.dim ?? 'taste')
+      const limit = threshold ?? (sameDim
+        ? (Number.isFinite(Number(config.build?.similarityThreshold)) ? Number(config.build.similarityThreshold) : 0.35)
+        : 0.8)
+      if (mergeScore(base.fact, other.fact) >= limit) {
+        members.push(other)
+        taken.add(other.id)
+      }
+    }
+    if (members.length > 1) {
+      taken.add(base.id)
+      groups.push(members)
+    }
+  }
+  if (groups.length === 0) {
+    process.stdout.write('没有发现可合并的相似条目\n')
+    return
+  }
+  const lines = [`发现 ${groups.length} 组相似条目（共涉及 ${groups.reduce((n, g) => n + g.length, 0)} 条）`]
+  for (const [index, group] of groups.entries()) {
+    const winner = group[0]
+    lines.push(`\n${index + 1}. 保留 [${winner.dim}] ${winner.fact}（${(winner.confidence ?? 0).toFixed(2)}）`)
+    for (const loser of group.slice(1)) {
+      lines.push(`   并入 [${loser.dim}] ${loser.fact}（${(loser.confidence ?? 0).toFixed(2)}，相似 ${mergeScore(winner.fact, loser.fact).toFixed(2)}）`)
+    }
+  }
+  if (flags.apply !== true) {
+    lines.push('\n（以上只是预览；确认无误后加 --apply 落库）')
+    process.stdout.write(`${lines.join('\n')}\n`)
+    return
+  }
+  snapshotDeclarations('dedupe')
+  const merged = new Map()
+  for (const group of groups) {
+    const winner = group[0]
+    // 正文取最可信那条的措辞；几乎完全包含时取信息更全的长句。
+    const longest = [...group].sort((a, b) => String(b.fact).length - String(a.fact).length)[0]
+    const containMax = Math.max(coverage(winner.fact, longest.fact), coverage(longest.fact, winner.fact))
+    const keepText = containMax >= 0.92 ? longest.fact : winner.fact
+    const kept = {
+      ...winner,
+      fact: keepText,
+      confidence: Math.max(...group.map((m) => Number(m.confidence ?? 0))),
+      core: group.some((m) => m.core === true) ? true : winner.core,
+      at: nowIso(),
+      editedAt: nowIso(),
+      mergedFrom: [
+        ...(Array.isArray(winner.mergedFrom) ? winner.mergedFrom : []),
+        ...group.slice(1).map((m) => ({ id: m.id, dim: m.dim, fact: m.fact })),
+      ],
+    }
+    merged.set(winner.id, kept)
+    for (const loser of group.slice(1)) merged.set(loser.id, null)
+  }
+  const next = records.map((r) => (merged.has(r.id) ? merged.get(r.id) : r)).filter((r) => r !== null)
+  writeJsonl(p('declarations.jsonl'), next)
+  appendJsonl(p('changelog.jsonl'), {
+    at: nowIso(),
+    kind: 'dedupe',
+    groups: groups.map((g) => ({ keep: g[0].id, drop: g.slice(1).map((m) => m.id) })),
+    before: records.length,
+    after: next.length,
+  })
+  rebuildQuietly()
+  process.stdout.write(`${lines.join('\n')}\n\n已合并 ${groups.length} 组：${records.length} 条 → ${next.length} 条（画像已刷新）\n`)
 }
 
 /** 批量导入：JSON 数组或 { items: [...] }，字段与 declare 一致。 */
@@ -2592,6 +2949,8 @@ const SET_SPEC = {
   'build.autoBuildMinIntervalMs': { type: 'number', min: 0, max: 86400000, integer: true, note: '两次自动重建的最小间隔' },
   'build.dedupe': { type: 'boolean', note: '是否做近似去重' },
   'build.similarityThreshold': { type: 'number', min: 0.1, max: 1, note: '判定同义的相似度阈值' },
+  'build.autoMergeSemantic': { type: 'boolean', note: '轮末让模型再判一次语义同义（字面抓不到的）' },
+  'build.semanticMergeIntervalMs': { type: 'number', min: 60000, max: 86400000, integer: true, note: '语义合并最小间隔（毫秒，默认 30 分钟）' },
   'build.includeObservedItems': { type: 'boolean', note: '是否把运行统计当条目（默认关）' },
   'extract.enabled': { type: 'boolean', note: '轮末是否用模型提炼' },
   'extract.provider': { type: 'string', note: '提炼用的 provider（空=跟随会话）' },
@@ -3068,6 +3427,7 @@ const COMMANDS = {
   forget: cmdForget,
   edit: cmdEdit,
   merge: cmdMerge,
+  dedupe: cmdDedupe,
   import: cmdImport,
   ingest: cmdIngest,
   dims: cmdDims,
@@ -3088,7 +3448,7 @@ const COMMANDS = {
 // 并发时后写的一方会把前一方刚加的记录覆盖掉（这正是丢记录的元凶）。
 // 追加型命令（declare/observe）也一并加锁：否则它可能恰好插在别人「读」和「写回」之间，
 // 追加的那条会被整表写回抹掉——这正是实测丢 3 条声明的现场。
-const MUTATING = new Set(['declare', 'observe', 'build', 'review', 'forget', 'edit', 'merge', 'import', 'dims', 'set', 'reset', 'restore', 'validate', 'redact', 'ingest'])
+const MUTATING = new Set(['declare', 'observe', 'build', 'review', 'forget', 'edit', 'merge', 'import', 'dims', 'set', 'reset', 'restore', 'validate', 'redact', 'ingest', 'dedupe'])
 
 function main() {
   const { positional, flags } = parseArgs(process.argv.slice(2))

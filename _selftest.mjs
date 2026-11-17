@@ -88,7 +88,9 @@ const fakeLlm = {
       lastPayload = JSON.stringify(options?.messages ?? [])
       lastSystem = String(options?.system ?? '')
       if (signal?.aborted === true) throw new Error('aborted')
-      yield { type: 'text-delta', text: EXTRACT_REPLY }
+      // 语义合并与提炼共用同一个假模型：按 system 分流，别让合并请求拿到 facts。
+      const judge = lastSystem.includes('判断每对是否在讲同一件关于用户的事实')
+      yield { type: 'text-delta', text: judge ? '{"pairs":[{"i":0,"same":true,"keep":"a","reason":"同一件事"}]}' : EXTRACT_REPLY }
     },
   }),
 }
@@ -279,7 +281,7 @@ const legacy = JSON.parse(readFileSync(cfgPath, 'utf8'))
 writeFileSync(cfgPath, JSON.stringify({ ...legacy, schemaVersion: 1, build: undefined, conflicts: undefined, scope: undefined }))
 run('status', '--json')   // 任意命令都会走 loadConfig → 迁移
 const migrated = JSON.parse(readFileSync(cfgPath, 'utf8'))
-check('config 迁移到 schemaVersion 5', migrated.schemaVersion === 5, String(migrated.schemaVersion))
+check('config 迁移到 schemaVersion 6', migrated.schemaVersion === 6, String(migrated.schemaVersion))
 check('迁移补出 conflicts/scope/autoBuild', migrated.conflicts?.strategy === 'newest' && migrated.scope !== undefined && migrated.build?.autoBuild === true)
 check('迁移留备份文件', readdirSync(HOME).some((f) => f.startsWith('config.json.bak-v1-')))
 
@@ -404,8 +406,12 @@ run('declare', '--dim', 'taste', '--key', 'design.module-separation', '--fact', 
 run('declare', '--dim', 'taste', '--key', 'taste.single_responsibility', '--fact', '用户要求每个插件只做一件事，功能不许混在一起', '--confidence', '0.9')
 run('build', '--all-scopes')
 const mergedPanel = JSON.parse(run('panel'))
+// v25 起同义条目在「写入端」就合并了（不再等 build），所以这里两处都要认：
+// 要么 conflicts 里有 status=merged，要么落盘的那条带着 mergedFrom。
+const declRows = readFileSync(join(HOME, 'declarations.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+const mergedByWrite = declRows.find((row) => (row.mergedFrom ?? []).length > 0)
 const mergedEntry = (mergedPanel.conflicts ?? []).find((c) => c.status === 'merged')
-check('同义条目被自动合并（相似度 0.46 > 阈值 0.45）', mergedEntry !== undefined, mergedEntry?.key ?? 'none')
+check('同义条目被自动合并（写入端合并或 build 合并，二者其一）', mergedEntry !== undefined || mergedByWrite !== undefined, mergedEntry?.key ?? (mergedByWrite ? `mergedFrom=${mergedByWrite.mergedFrom.length}` : 'none'))
 const prefTexts = (mergedPanel.items ?? []).filter((it) => it.dim === 'taste').map((it) => it.text)
 check('合并后只留权重更高的一条', prefTexts.some((t) => t.includes('每个插件只做一件事')) && !prefTexts.some((t) => t.includes('不同插件职责分离')), prefTexts.join(' | '))
 check('合并后画像不自相矛盾（声明数仍记 8+2）', mergedPanel.drift?.stale === false, JSON.stringify(mergedPanel.drift))
@@ -465,6 +471,23 @@ const victim = JSON.parse(readFileSync(join(HOME, 'profile.json'), 'utf8'))
 const forgetOut = run('forget', '--id', victim)
 check('forget 自己会重建画像（不靠外部 build）', itemsNow() === itemsBefore - 1, `${itemsBefore} → ${itemsNow()}`)
 check('forget 的回执说「画像已刷新」', forgetOut.includes('画像已刷新'), forgetOut.split('\n')[0])
+
+// 20 语义合并：字面不像、意思相同的两条，交给模型判后自动并
+// 放在最后跑 —— 它会改写条目集合，别影响前面那些按 id/条数断言的用例。
+{
+  const countNow = () => readFileSync(join(HOME, 'declarations.jsonl'), 'utf8').split('\n').filter(Boolean).length
+  run('declare', '--dim', 'taste', '--fact', '用户习惯用 VS Code 编辑代码', '--no-merge', '--force')
+  run('declare', '--dim', 'taste', '--fact', '用户平时用 VS Code 写代码', '--no-merge', '--force')
+  const beforeSemantic = countNow()
+  const sSem = { id: 's-semantic' }
+  emit('session/event', sSem, { type: 'turn/start' })
+  emit('session/event', sSem, { type: 'request/header', data: { header: { config: { provider: 'test', model: 'test-model' } } } })
+  emit('session/event', sSem, { type: 'turn/end' })
+  await new Promise((resolve) => setTimeout(resolve, 2500))
+  const afterSemantic = countNow()
+  check('语义合并：模型判定同义后自动并成一条', afterSemantic === beforeSemantic - 1, `${beforeSemantic} → ${afterSemantic}`)
+  check('语义合并留下 judged=model 的痕迹', readFileSync(join(HOME, 'declarations.jsonl'), 'utf8').includes('"judged":"model"'), 'no judged marker')
+}
 
 rmSync(HOME, { recursive: true, force: true })
 console.log(process.exitCode ? '\n有用例失败' : '\n全部通过')

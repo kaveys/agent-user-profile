@@ -190,7 +190,7 @@ const fakeCtx = (opts = {}) => {
   const list = lines.find((r) => r.id === 2)
   const bad = lines.find((r) => r.id === 3)
   const toolNames = (list?.result?.tools ?? []).map((tool) => tool.name)
-  check('MCP tools/list 暴露 11 个工具', toolNames.length === 11, String(toolNames.length))
+  check('MCP tools/list 暴露 12 个工具', toolNames.length === 12, String(toolNames.length))
   check('MCP 提供 profile_ingest（从别的 AI 搬回画像）', toolNames.includes('profile_ingest'), toolNames.join(','))
   check('MCP 未知工具返回 -32602', bad?.error?.code === -32602, JSON.stringify(bad?.error ?? {}))
   rmSync(dir, { recursive: true, force: true })

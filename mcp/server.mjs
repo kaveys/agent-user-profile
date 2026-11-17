@@ -147,6 +147,17 @@ const TOOLS = [
     },
   },
   {
+    name: 'profile_dedupe',
+    description: '主动合并相似条目：找出「换了说法讲同一件事」的几条，并成一条（保留信息最全的正文，其余原文进 mergedFrom）。默认只预览，apply=true 才落库。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        apply: { type: 'boolean', description: 'true 才真正合并；默认 false 只列出将要合并的分组' },
+        threshold: { type: 'number', description: '同大类判定阈值，默认 0.35（实测同义改写 ≥0.38，不相关 ≤0.14）' },
+      },
+    },
+  },
+  {
     name: 'profile_backup',
     description: '备份画像。dry-run 只算体积，out 导出到本地目录，upload 推到已配置的 WebDAV。',
     inputSchema: {
@@ -279,6 +290,14 @@ function callTool(name, args = {}) {
     } finally {
       try { unlinkSync(file) } catch { /* 临时文件清不掉不影响结果 */ }
     }
+  }
+
+  if (name === 'profile_dedupe') {
+    const argv = ['dedupe']
+    if (args.apply === true) argv.push('--apply')
+    if (Number.isFinite(Number(args.threshold))) argv.push('--threshold', String(Number(args.threshold)))
+    const result = runCli(argv, { timeoutMs: 30000 })
+    return result.ok ? okText(result.text) : errText(result.text)
   }
 
   if (name === 'profile_backup') {

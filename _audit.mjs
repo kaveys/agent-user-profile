@@ -106,8 +106,8 @@ const cfgOf = (home) => readJson(home, 'config.json')
 // ---------------------------------------------------------------- 6. merge 自己到自己
 {
   const home = fresh()
-  run(home, ['declare', '--dim', 'taste', '--fact', '用户喜欢简洁界面', '--confidence', '0.9'])
-  run(home, ['declare', '--dim', 'taste', '--fact', '用户喜欢简洁的界面风格', '--confidence', '0.6'])
+  run(home, ['declare', '--dim', 'taste', '--fact', '用户喜欢简洁界面', '--confidence', '0.9', '--no-merge'])
+  run(home, ['declare', '--dim', 'taste', '--fact', '用户喜欢简洁的界面风格', '--confidence', '0.6', '--no-merge'])
   const items = readJsonl(home, 'declarations.jsonl')
   const [a, b] = items.map((i) => i.id)
   const r = run(home, ['merge', '--keep', a, '--drop', a])

@@ -580,6 +580,7 @@ window.__ModuleLoader__.load({
       const [picked, setPicked] = React.useState({})
       const [armed, setArmed] = React.useState('')
       const [bulkArmed, setBulkArmed] = React.useState(false)
+      const [dedupeArmed, setDedupeArmed] = React.useState(false)
 
       const needle = query.trim().toLowerCase()
       const shown = items
@@ -605,7 +606,31 @@ window.__ModuleLoader__.load({
             h('option', { value: 'weight' }, '按权重'),
             h('option', { value: 'time' }, '按时间'),
             h('option', { value: 'dim' }, '按维度')),
-          h('span', { style: styles.meta }, `${shown.length} / ${items.length} 条`)),
+          h('span', { style: styles.meta }, `${shown.length} / ${items.length} 条`),
+          // 主动合并相似条目：先预览（列出会怎么并），确认后才落库 —— 合并会改写数据文件，
+          // 必须先看清楚，所以这里也是两段式（第二次点击叫「确认合并 N 组」）。
+          h('button', {
+            style: { ...styles.button, ...(dedupeArmed ? { borderColor: T.brand, fontWeight: 600 } : {}) },
+            disabled: busy,
+            title: '把换了说法讲同一件事的几条并成一条',
+            onClick: async () => {
+              if (dedupeArmed !== true) {
+                setDedupeArmed(true)
+                setTimeout(() => setDedupeArmed(false), 8000)
+                await run({ action: 'dedupe' })
+                return
+              }
+              setDedupeArmed(false)
+              await run({ action: 'dedupe', apply: true })
+            },
+          }, dedupeArmed === true ? '确认合并' : '合并相似条目'),
+          // 字面不像、其实同义的交给模型判；合并前自动留快照，判错的代价是一次还原。
+          h('button', {
+            style: styles.button,
+            disabled: busy,
+            title: '用模型判断「换了说法讲同一件事」，判完直接合并',
+            onClick: () => run({ action: 'dedupe-semantic' }),
+          }, '让 AI 判同义')),
         pickedIds.length === 0 ? null : h('div', { style: { ...styles.notice, display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' } },
           h('span', null, `已选 ${pickedIds.length} 条`),
           h('button', {
@@ -838,6 +863,8 @@ window.__ModuleLoader__.load({
       { group: '说法冲突时', fields: [
         { path: 'conflicts.strategy', label: '同一件事有两种说法', type: 'select', options: ['newest', 'freeze'], optionLabels: ['以最新一次为准（newest）', '两条都留着，等你判断（freeze）'] },
         { path: 'build.dedupe', label: '自动合并重复条目', type: 'bool', hint: '意思相同只是措辞不同的，保留更确定的那条' },
+      { path: 'build.autoMergeSemantic', label: '让模型再判一次语义同义', type: 'bool', hint: '字面不像、其实讲同一件事的，交给模型判；判完先留快照，可整批还原' },
+      { path: 'build.similarityThreshold', label: '合并门槛（0.1–1）', type: 'number', min: 0.1, max: 1, step: 0.05, hint: '默认 0.35：实测同义改写 ≥0.38、不相关 ≤0.14，调低会更激进' },
       ] },
       { group: '自动整理', fields: [
         { path: 'extract.enabled', label: '聊完自动整理新偏好', type: 'bool', hint: '每轮结束把对话里能长期复用的信息提炼成条目' },

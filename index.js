@@ -733,6 +733,28 @@ const ACTION_ROUTE = '/user-profile/action'
       if (typeof input.keep !== 'string' || typeof input.drop !== 'string') return { ok: false, error: '缺少 keep / drop' }
       return runCli(['merge', '--keep', input.keep, '--drop', input.drop])
     },
+    /** 主动合并相似条目（v25）：默认只预览，apply=true 才落库（会先留快照）。 */
+    dedupe(input) {
+      const args = ['dedupe']
+      if (input.apply === true) args.push('--apply')
+      if (Number.isFinite(Number(input.threshold))) args.push('--threshold', String(Number(input.threshold)))
+      return runCli(args, 30000)
+    },
+    /** 语义合并：字面抓不到的「换了说法」交给模型判，判完直接回灌（可撤销：快照）。 */
+    async 'dedupe-semantic'() {
+      const cfg = config()
+      const fallback = typeof cfg.extract?.provider === 'string' && cfg.extract.provider.length > 0
+        && typeof cfg.extract?.model === 'string' && cfg.extract.model.length > 0
+        ? { provider: cfg.extract.provider, model: cfg.extract.model }
+        : null
+      const result = await semanticMerge(lastRoute ?? fallback)
+      if (result.pairs === 0) return { ok: true, output: '没有发现候选对（字面相似度与共现片段都没命中）' }
+      if (result.judged === 0) return { ok: false, error: `候选 ${result.pairs} 对，但模型判定失败或不可用（看 diag.log）` }
+      return {
+        ok: true,
+        output: `候选 ${result.pairs} 对 → 模型判定同义 ${result.judged} 对 → 已合并 ${result.applied} 组（画像已刷新；可在「恢复点」整批还原）`,
+      }
+    },
     /** 粘贴 JSON 批量导入：CLI 只吃文件，所以先落一个临时文件再交给它。 */
     // 从别的 AI 搬回画像（v24）：面板里贴一段「你掌握了我什么」，CLI 负责切分/归类/定权。
     // 文本走临时文件而不是命令行参数 —— Windows 单个参数上限 32k，整段答复很容易超。
@@ -844,7 +866,16 @@ const ACTION_ROUTE = '/user-profile/action'
       const handler = ACTIONS[action]
       if (handler === undefined) return fail(400, `未知动作 ${action}`)
       try {
-        return finish(handler(input))
+        const result = handler(input)
+        // 语义判定要等模型，handler 是 async —— 这里必须等它，否则序列化出一个空对象。
+        if (result !== null && typeof result?.then === 'function') {
+          result.then((value) => finish(value)).catch((error) => {
+            log('panel action failed', action, error?.message)
+            finish({ ok: false, error: String(error?.message ?? error) })
+          })
+          return undefined
+        }
+        return finish(result)
       } catch (error) {
         log('panel action failed', action, error?.message)
         return finish({ ok: false, error: String(error?.message ?? error) })
@@ -897,6 +928,8 @@ const ACTION_ROUTE = '/user-profile/action'
   // 隐私边界：对话正文只在内存里拼成一次请求，永不落盘；落盘的只有提炼结果。
   const turnText = new WeakMap()
   const sessionRoute = new WeakMap()
+  // 面板/轮末没有 session 时用它兜底：最近一次观测到的 provider/model。
+  let lastRoute = null
   // 会话 id 缓存：从首条 session 事件里抓，供 provenance 归因用
   const sessionIds = new WeakMap()
   const extracting = new WeakSet()
@@ -960,6 +993,7 @@ const ACTION_ROUTE = '/user-profile/action'
     const config0 = header?.config ?? {}
     if (typeof config0.provider === 'string' && typeof config0.model === 'string') {
       sessionRoute.set(session, { provider: config0.provider, model: config0.model })
+      lastRoute = sessionRoute.get(session)
     }
   }
 
@@ -973,6 +1007,7 @@ const ACTION_ROUTE = '/user-profile/action'
       && typeof source.provider === 'string'
       && typeof source.model === 'string') {
       sessionRoute.set(session, { provider: source.provider, model: source.model })
+      lastRoute = sessionRoute.get(session)
     }
   }
 
@@ -1210,6 +1245,137 @@ const ACTION_ROUTE = '/user-profile/action'
     }
   }
 
+  /**
+   * 语义合并：字面相似度抓不到的「换了说法讲同一件事」，交给模型判。
+   * 判据写在系统提示里，输出严格 JSON；只回灌 same=true 的对，且 keep 取更可信那条。
+   */
+  const MERGE_SYSTEM = [
+    '你在帮助手整理「关于用户」的记忆条目。给你若干对句子，每对是两条已记录的记忆。',
+    '判断每对是否在讲同一件关于用户的事实（同一个意思），而不是仅仅涉及同一个话题。',
+    '规则：',
+    '1. 数字不同（班级、年份、版本、数量）→ 不是同一件事。',
+    '2. 一句被另一句基本包含、只是更简略 → 是同一件事。',
+    '3. 只是都提到同一领域（都提到界面、都提到插件），但说的是不同要求 → 不是同一件事。',
+    '4. 一条是偏好、另一条是禁止/红线 → 不是同一件事。',
+    '只输出 JSON，不要解释：{"pairs":[{"i":0,"same":true,"keep":"a","reason":"不超过12字"}]}',
+  ].join('\n')
+
+  let mergeJudging = false
+  let lastSemanticMergeAt = 0
+
+  const parseJudge = (raw) => {
+    const text = String(raw ?? '')
+    const start = text.indexOf('{')
+    const end = text.lastIndexOf('}')
+    if (start < 0 || end <= start) return []
+    try {
+      const data = JSON.parse(text.slice(start, end + 1))
+      const list = Array.isArray(data) ? data : (Array.isArray(data?.pairs) ? data.pairs : [])
+      return list.filter((item) => item && typeof item.i === 'number' && item.same === true)
+    } catch {
+      return []
+    }
+  }
+
+  /** 返回 { pairs, judged, applied } —— 失败只记日志，不抛。 */
+  async function semanticMerge(route) {
+    const cfg = config()
+    if (cfg.build?.autoMergeSemantic === false) return { pairs: 0, judged: 0, applied: 0 }
+    if (mergeJudging) return { pairs: 0, judged: 0, applied: 0 }
+    let candidates = []
+    try {
+      const raw = execFileSync(process.execPath, [CLI_PATH, 'dedupe', '--pairs'], {
+        encoding: 'utf8',
+        timeout: 20000,
+        env: process.env,
+        windowsHide: true,
+      })
+      const start = raw.indexOf('{')
+      candidates = JSON.parse(raw.slice(start)).pairs ?? []
+    } catch (error) {
+      log('dedupe --pairs failed', error?.message)
+      return { pairs: 0, judged: 0, applied: 0 }
+    }
+    if (candidates.length === 0) return { pairs: 0, judged: 0, applied: 0 }
+
+    const chosen = route ?? lastRoute
+    const llm = llmService()
+    if (chosen === undefined || chosen === null || typeof llm?.prepareCall !== 'function') {
+      log('semantic merge skipped: no route or llm')
+      return { pairs: candidates.length, judged: 0, applied: 0 }
+    }
+
+    mergeJudging = true
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 45000)
+    try {
+      const mod = await dshLlm()
+      const createUserMessage = mod?.createUserMessage
+      const BlockAssembler = mod?.BlockAssembler
+      const call = await llm.prepareCall({ ...chosen, maxTokens: 900 }, controller.signal)
+      const lines = candidates.map((pair, index) => `${index}. A：${pair.a.fact}\n   B：${pair.b.fact}`)
+      const messages = typeof createUserMessage === 'function'
+        ? [createUserMessage({ content: [{ type: 'text', text: lines.join('\n') }], source: { kind: 'agent-instructions', form: 'instructions', changes: [] } })]
+        : [{ role: 'user', content: [{ type: 'text', text: lines.join('\n') }] }]
+      let raw = ''
+      if (typeof BlockAssembler === 'function') {
+        const assembler = new BlockAssembler()
+        for await (const chunk of call.stream({ ...call.config, messages, system: MERGE_SYSTEM, purpose: 'user-profile-dedupe', signal: controller.signal })) {
+          assembler.push(chunk)
+        }
+        raw = assembler.blocks().filter((b) => b.type === 'text').map((b) => b.text).join('')
+      } else {
+        for await (const chunk of call.stream({ ...call.config, messages, system: MERGE_SYSTEM, purpose: 'user-profile-dedupe', signal: controller.signal })) {
+          if (typeof chunk?.text === 'string') raw += chunk.text
+        }
+      }
+      const verdicts = parseJudge(raw)
+      if (verdicts.length === 0) return { pairs: candidates.length, judged: 0, applied: 0 }
+
+      const spec = []
+      for (const verdict of verdicts) {
+        const pair = candidates[verdict.i]
+        if (pair === undefined) continue
+        // 模型说留哪条就留哪条；没说或说错就用可信度兜底（高者留）。
+        const keepFirst = verdict.keep === 'a' ? true : verdict.keep === 'b' ? false : pair.a.c >= pair.b.c
+        spec.push(`${keepFirst ? pair.a.id : pair.b.id}|${keepFirst ? pair.b.id : pair.a.id}`)
+      }
+      if (spec.length === 0) return { pairs: candidates.length, judged: verdicts.length, applied: 0 }
+      try {
+        execFileSync(process.execPath, [CLI_PATH, 'dedupe', '--apply-pairs', spec.join(',')], {
+          encoding: 'utf8',
+          timeout: 30000,
+          env: process.env,
+          windowsHide: true,
+        })
+        panelCache = { at: 0, body: '' }
+      } catch (error) {
+        log('dedupe --apply-pairs failed', error?.message)
+        return { pairs: candidates.length, judged: verdicts.length, applied: 0 }
+      }
+      lastSemanticMergeAt = Date.now()
+      return { pairs: candidates.length, judged: verdicts.length, applied: spec.length }
+    } catch (error) {
+      log('semantic merge failed', error?.message)
+      return { pairs: candidates.length, judged: 0, applied: 0 }
+    } finally {
+      clearTimeout(timer)
+      mergeJudging = false
+    }
+  }
+
+  /** 轮末自动跑一次语义合并：默认 30 分钟最多一次，避免每轮都调模型。 */
+  async function autoSemanticMerge(session) {
+    const cfg = config()
+    if (cfg.build?.autoMergeSemantic === false) return
+    const gap = Number.isFinite(cfg.build?.semanticMergeIntervalMs) ? cfg.build.semanticMergeIntervalMs : 1800000
+    if (Date.now() - lastSemanticMergeAt < gap) return
+    const route = sessionRoute.get(session)
+    if (route === undefined) return
+    const result = await semanticMerge(route)
+    if (result.applied > 0) log('semantic merge applied', result.applied, 'groups')
+  }
+
   /** session -> { tools: Map<string, number>, ok: number, fail: number, steps: number, startedAt: number } */
   const turnStats = new WeakMap()
   /** session -> 需要在本轮 pre-step 注入 */
@@ -1341,6 +1507,8 @@ const ACTION_ROUTE = '/user-profile/action'
           autoBuild()
           // 语义提取异步跑：不阻塞 turn/end，也不让模型慢/失败拖住用户任务。
           void extractTurn(session).catch((error) => log('extract threw', error?.message))
+          // 语义合并也异步：提炼完可能又冒出新的同义条目，间隔节流后顺手并一次。
+          void autoSemanticMerge(session).catch((error) => log('semantic merge threw', error?.message))
           break
         default:
           break

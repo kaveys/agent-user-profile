@@ -35,6 +35,7 @@ jobs:
           node --check _audit5.mjs
           node --check _audit6.mjs
           node --check _audit7.mjs
+      node --check _audit8.mjs
           node --check _compat.mjs
           node --check _render.mjs
           node --check _qa-frames.mjs
@@ -62,6 +63,9 @@ jobs:
 
       - name: Adversarial audit 7 (ingest from another AI)
         run: node _audit7.mjs
+
+      - name: Adversarial audit 8 (similar entries are merged actively)
+        run: node _audit8.mjs
 
       - name: Degraded host matrix
         run: node _compat.mjs
