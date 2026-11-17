@@ -734,8 +734,13 @@ function inScope(record, scope) {
   return (record.scopeId ?? '') === scope.id
 }
 
-/** 统一排序：权重降序 → 最近出现降序 → 核心优先。面板与注入都用它，保证两处一致。 */
+/** 统一排序：核心优先 → 权重降序 → 最近出现降序 → 文本更长者优先。面板与注入都用它，保证两处一致。 */
 function rankItem(a, b) {
+  // 核心（红线/硬要求）在最前面：注入块里它单独占第一段，面板也应该照着排，
+  // 否则「按优先级排列」这句话在面板上是假的。
+  const ca = a?.core === true
+  const cb = b?.core === true
+  if (ca !== cb) return ca ? -1 : 1
   const wa = Number(a?.weight ?? 0)
   const wb = Number(b?.weight ?? 0)
   if (wa !== wb) return wb - wa
@@ -842,6 +847,28 @@ function cmdDeclare({ flags }) {
   assertValid(record, config, flags)
   const clampNote = truncated ? `\n（原文 ${rawFact.length} 字，超过 ${MAX_FACT} 字上限，已截断后记录）` : ''
   const redactNote = cleaned.hits > 0 ? `\n（已脱敏 ${cleaned.hits} 处敏感内容）` : ''
+
+  // 同一句话再说一遍 = 刷新那一条，不是再插一条。
+  // （早前只靠 build 阶段的相似度合并来兜底，结果 declarations.jsonl 越滚越长、
+  //  历史里堆着一串同义条目；这里在写入端就把它钉住。）
+  const targetFile = flags.pending === true ? p('pending.jsonl') : p('declarations.jsonl')
+  const existing = readJsonl(targetFile).find((row) => (
+    row?.dim === record.dim
+    && row?.key === record.key
+    && (row?.scope ?? 'global') === (record.scope ?? 'global')
+    && (row?.scopeId ?? '') === (record.scopeId ?? '')
+    && row?.fact === record.fact
+  ))
+  if (existing !== undefined) {
+    const rows = readJsonl(targetFile).map((row) => (row === existing || row?.id === existing.id
+      ? { ...row, at: record.at, editedAt: record.at, confidence: record.confidence, core: row.core === true || record.core, provenance: record.provenance }
+      : row))
+    writeJsonl(targetFile, rows)
+    if (flags.pending !== true) rebuildQuietly()
+    process.stdout.write(`已更新（原来是同一条）[${record.dim}] ${record.fact}${clampNote}${redactNote}\n${flags.pending === true ? '' : '（画像已刷新）\n'}`)
+    return
+  }
+
   if (flags.pending === true) {
     appendJsonl(p('pending.jsonl'), record)
     process.stdout.write(`已加入待审候选 [${dim}] ${record.fact}${clampNote}${redactNote}\n（确认：profile review --accept ${record.id}；或 review --accept all）\n`)
@@ -849,8 +876,7 @@ function cmdDeclare({ flags }) {
   }
   appendJsonl(p('declarations.jsonl'), record)
   rebuildQuietly()
-  process.stdout.write(`已记录 [${dim}] ${record.fact}${clampNote}${redactNote}\n（画像已刷新）\n`)
-}
+  process.stdout.write(`已记录 [${dim}] ${record.fact}${clampNote}${redactNote}\n（画像已刷新）\n`)}
 
 function cmdObserve({ flags }) {
   const config = loadConfig()
@@ -1620,13 +1646,29 @@ function cmdReview({ flags }) {
 
   const accept = typeof flags.accept === 'string'
   const picked = target === 'all' ? pending : pending.filter((r) => r.id === target)
-  if (picked.length === 0) die(`没有匹配的候选：${target}`)
+  if (picked.length === 0) {
+    // `--accept all` 在没有候选时是「已经处理完了」，不该当成错误：
+    // 面板上「全部接受」是个常规按钮，空队列时报错只会让人以为坏了。
+    if (target === 'all') {
+      process.stdout.write(`没有待审候选，无需处理。\n`)
+      return
+    }
+    die(`没有匹配的候选：${target}`)
+  }
   const pickedIds = new Set(picked.map((r) => r.id))
 
   if (accept) {
+    // 接受时也要挡重复：候选可能是同一句话的第二次提炼，直接 append 会留下两条一样的。
+    const declared = readJsonl(p('declarations.jsonl'))
+    const seen = new Set(declared.map((row) => `${row?.dim}|${row?.key}|${row?.fact}`))
+    let skipped = 0
     for (const record of picked) {
+      const fingerprint = `${record.dim}|${record.key}|${record.fact}`
+      if (seen.has(fingerprint)) { skipped += 1; continue }
+      seen.add(fingerprint)
       appendJsonl(p('declarations.jsonl'), { ...record, acceptedAt: nowIso() })
     }
+    if (skipped > 0) process.stdout.write(`（其中 ${skipped} 条与已有条目重复，未重复写入）\n`)
   }
   writeJsonl(p('pending.jsonl'), pending.filter((r) => !pickedIds.has(r.id)))
   rebuildQuietly()
@@ -1730,10 +1772,19 @@ function cmdEdit({ flags }) {
   if (record === undefined) die(`没有这条声明：${id}`)
 
   const before = { ...record }
-  const edited = typeof flags.fact === 'string' && flags.fact.trim().length > 0
-    ? redactWithCount(flags.fact.trim(), config)
+  const rawFact = typeof flags.fact === 'string' ? flags.fact.trim() : ''
+  // 隐私闸门必须在脱敏之前：命令行的 declare 一直是这么做的，edit 之前漏了这一步 ——
+  // 于是「把内容改成身份证号」会被打码后写进去，而规则要的是根本不收。
+  if (rawFact.length > 0 && flags.force !== true) {
+    const blocked = blockedPrivacy(rawFact)
+    if (blocked.length > 0) {
+      die(`已拦截：内容含${blocked.join('、')}，不进记忆库（确需记录请显式加 --force）`)
+    }
+  }
+  const edited = rawFact.length > 0
+    ? redactWithCount(rawFact, config)
     : { text: record.fact, hits: 0 }
-  if (typeof flags.fact === 'string' && flags.fact.trim().length > 0) record.fact = edited.text
+  if (rawFact.length > 0) record.fact = edited.text
   if (typeof flags.dim === 'string' && flags.dim.length > 0) {
     if (!config.dimensions.includes(flags.dim)) die(`未知维度 ${flags.dim}；可用：${config.dimensions.join(', ')}`)
     record.dim = flags.dim

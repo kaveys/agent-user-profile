@@ -291,10 +291,12 @@ $CLI set capture.turnText false
 
 ```bash
 node _selftest.mjs            # 注入 / 采集 / 提炼 的单元级用例（隔离 temp HOME）
-node _e2e.mjs                 # 35 项真实 CLI 与 HTTP 动作自检（会打运行中的 dsh）
-node _audit.mjs               # 28 项对抗式边界检查（脏输入 / 冲突操作 / 锁 / 作用域）
+node _e2e.mjs                 # 42 项真实 CLI 与 HTTP 动作自检（会打运行中的 dsh；--cli-only 跳过 HTTP）
+node _audit.mjs               # 33 项对抗式边界检查（脏输入 / 冲突操作 / 锁 / 作用域）
+node _audit2.mjs              # 34 项往返与极限（导出→重置→导入 / 坏行 / 坏配置 / 快照上限 / 并发）
+node _audit3.mjs              # 51 项逻辑一致性（预算与排序 / 闸门顺序 / MCP 协议 / 面板自洽）
 node _render.mjs             # 面板渲染烟测：7 个页签逐个点 + payload 洁净度
-node scripts/verify-install.mjs   # 12 项安装体检（不重启、不起 dsh）
+node scripts/verify-install.mjs   # 13 项安装体检（不重启、不起 dsh）
 ```
 
 `_selftest.mjs` 覆盖：空数据降级、证据不足不注入、两段式注入（核心段 + topK）、同轮不重复注入、
@@ -303,6 +305,8 @@ node scripts/verify-install.mjs   # 12 项安装体检（不重启、不起 dsh�
 并发写不丢记录、陈旧锁自愈、同义去重、drift 一致性自检。
 
 `_audit.mjs` 专挑「看起来能用、边界会出血」的地方：删仍有条目的自定义大类、删内置大类、非法/越界/未知的配置写入、edit 到不存在的维度、merge 自己到自己、空事实、越界权重、未 init 的目录、重复 id 导入、restore 路径穿越、空库 build、`--all-scopes` 是否泄漏别的项目、陈旧锁自愈与新鲜锁不硬闯。
+
+`_audit3.mjs` 打的是「逻辑错」而不是「会不会崩」：预算收紧时是不是先裁了红线（规定里最优先的那段）、`topK` 会不会连个性化段一起裁、`本次带入 N 条` 有没有把被裁的算进去、隐私闸门与脱敏的先后顺序、同一句话重复声明是不是变成两条、`--accept all` 在空队列上会不会报错、MCP 的未知工具/未知方法/非法 JSON 是不是明确报错、面板的分区总数与权重排序是否自洽。
 
 `_render.mjs` 自带一个极简 hooks 运行时（`useState/useCallback/useEffect/createElement`），把**真实的 `ProfileSection`** 渲染成树，
 不需要浏览器也不依赖宿主 —— 面板改版后先跑它，能挡住「页签点了白屏」「字段读错路径」这类只有肉眼才发现的问题。

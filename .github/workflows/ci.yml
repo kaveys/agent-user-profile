@@ -29,6 +29,7 @@ jobs:
           node --check _e2e.mjs
           node --check _audit.mjs
           node --check _audit2.mjs
+          node --check _audit3.mjs
           node --check _render.mjs
 
       - name: Unit tests (storage / conflicts / injection)
@@ -39,6 +40,9 @@ jobs:
 
       - name: Adversarial audit 2 (corruption / round-trip / limits)
         run: node _audit2.mjs
+
+      - name: Adversarial audit 3 (logic: budget / gates / MCP / panel consistency)
+        run: node _audit3.mjs
 
       - name: Panel render smoke test
         run: node _render.mjs

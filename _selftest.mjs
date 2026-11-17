@@ -95,7 +95,7 @@ const fakeLlm = {
 const ctx = {
   on: (event, fn) => handlers.set(event, fn),
   loader: { import: async () => { throw new Error('no dsh-llm in test') } },
-  logger: { warn: () => {} },
+  logger: { warn: (...args) => { if (process.env.UP_DEBUG) console.log('LOG', ...args) } },
   inject: (deps, callback) => callback({
     llm: fakeLlm,
     effect: (fn) => fn(),
@@ -354,6 +354,30 @@ for (let i = 0; i < 40; i += 1) {
   if (llmCalls > callsBeforeSourceOnly) break
 }
 check('无 request/header 也能提取（路由取自消息 source）', llmCalls > callsBeforeSourceOnly, `${callsBeforeSourceOnly} → ${llmCalls}`)
+
+// 15.5 provenance 归因：会话 id 从首条 session 事件抓，写进声明的 provenance.session
+{
+  const session3 = { marker: 'no-id-field' }
+  const realId = 'sess-abc-123'
+  emit('session/event', session3, { type: 'session', data: { id: realId } })
+  emit('session/event', session3, { type: 'turn/start' })
+  emit('session/event', session3, {
+    type: 'user/message',
+    data: { content: [{ type: 'text', text: '我习惯用深色主题，以后做界面都按这个来：背景压深、留白多、字号克制一点，别搞五颜六色的强调色，正文用系统默认字体就行，卡片圆角别太大，动效要短。' }], role: 'user' },
+  })
+  emit('session/event', session3, {
+    type: 'assistant/message',
+    data: { message: { role: 'assistant', source: { kind: 'model', provider: 'test', model: 'test-model' }, content: [{ type: 'text', text: '记下了。' }] } },
+  })
+  emit('session/event', session3, { type: 'turn/end' })
+  for (let i = 0; i < 40; i += 1) {
+    await new Promise((r) => setTimeout(r, 100))
+    if (readFileSync(join(HOME, 'declarations.jsonl'), 'utf8').includes(realId)) break
+  }
+  const attributed = readFileSync(join(HOME, 'declarations.jsonl'), 'utf8').includes(`"session":"${realId}"`)
+  check('会话 id 被抓进 provenance（session 事件 → 声明归因）', attributed, realId)
+}
+
 
 // 16 独立性：画像插件绝不参与任务清单提醒（清单归 dsh-todo-sync 管）
 const sideCount = (list) => list.filter((m) => {

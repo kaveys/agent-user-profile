@@ -714,6 +714,8 @@ const ACTION_ROUTE = '/user-profile/action'
   // 隐私边界：对话正文只在内存里拼成一次请求，永不落盘；落盘的只有提炼结果。
   const turnText = new WeakMap()
   const sessionRoute = new WeakMap()
+  // 会话 id 缓存：从首条 session 事件里抓，供 provenance 归因用
+  const sessionIds = new WeakMap()
   const extracting = new WeakSet()
   const turnCounter = new WeakMap()
 
@@ -828,8 +830,14 @@ const ACTION_ROUTE = '/user-profile/action'
     return facts
   }
 
-  /** 会话标识：宿主不同版本暴露的字段不一样，能拿到哪个用哪个，拿不到就不记。 */
+  /**
+   * 会话标识：宿主不同版本暴露的字段不一样，能拿到哪个用哪个，拿不到就不记。
+   * 实测（2026-11-17）宿主传入的 session 对象上没有 id —— 真正的 id 在首条
+   * `session` 事件里（`data.id`），所以先查钩子抓到的缓存，再退回字段探测。
+   */
   const sessionIdOf = (session) => {
+    const cached = sessionIds.get(session)
+    if (typeof cached === 'string' && cached.length > 0) return cached
     for (const key of ['id', 'sessionId', 'key', 'title']) {
       const value = session?.[key]
       if (typeof value === 'string' && value.length > 0) return value
@@ -1096,6 +1104,12 @@ const ACTION_ROUTE = '/user-profile/action'
     try {
       if (session === undefined) return
       switch (event?.type) {
+        case 'session':
+          // 首条事件带着真正的会话 id；记下来，provenance 才有得归因。
+          if (typeof event?.data?.id === 'string' && event.data.id.length > 0) {
+            sessionIds.set(session, event.data.id)
+          }
+          break
         case 'turn/start':
           pendingInject.add(session)
           turnStats.delete(session)

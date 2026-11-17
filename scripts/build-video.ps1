@@ -1,7 +1,7 @@
-﻿# 生成带中文旁白的介绍短片（约 60 秒，1280x720）
-# 依赖：Windows SAPI 中文语音 + ffmpeg
+# 生成带中文旁白的介绍短片（约 60 秒，1280x720）
+# 依赖：Windows SAPI 中文语音 + ffmpeg（放在 PATH 里，或用 -Ffmpeg 指路径，或设 $env:FFMPEG）
 param(
-  [string]$Ffmpeg = '<home>\AppData\Local\Programs\ffmpeg\bin\ffmpeg.exe',
+  [string]$Ffmpeg = $(if ($env:FFMPEG) { $env:FFMPEG } else { 'ffmpeg.exe' }),
   [string]$OutDir = ''
 )
 $ErrorActionPreference = 'Stop'

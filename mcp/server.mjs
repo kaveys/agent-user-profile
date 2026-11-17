@@ -327,6 +327,11 @@ function handle(request) {
     const name = params?.name
     const args = params?.arguments ?? {}
     if (typeof name !== 'string' || name.length === 0) return fail(-32602, 'tools/call 需要 name')
+    // 未知工具要明确报错：早前会掉到 callTool 的末尾返回 undefined，
+    // 于是 stdout 上出现一个 {"result":{}} —— 调用方以为成功，实际上什么都没做。
+    if (!TOOLS.some((tool) => tool?.name === name)) {
+      return fail(-32602, `未知工具：${name}`)
+    }
     try {
       return reply(callTool(name, args))
     } catch (error) {
