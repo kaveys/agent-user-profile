@@ -5,6 +5,28 @@ The portrait schema version is tracked separately and lives in `config.json`.
 
 ## Unreleased
 
+### v19 — host compatibility layer (capability probe + degradation + doctor)
+
+Plugin version bumped to **0.3.0**. package.json gains dsh.compat = { hosts: ">=0.2.0", strategy: "capability-probe" }.
+
+#### Added
+- **Capability probe**: index.js inspects every host API it uses (session/event, agent/pre-step, webServer, connection, llm, loader) and writes the result to $DSH_USER_PROFILE_HOME/.host.json (no credentials, rewritten only on change).
+- **profile doctor / doctor --json**: turns that file into "available / missing → what it costs you", and prints the next step when the host has never written it.
+- **Event name aliases**: tool_call / tool-call / tool/call (and friends) are normalised before dispatch, so an older host's event names are not dropped as junk.
+- **Single startup line when degraded**: only the capabilities actually missing are listed.
+
+#### Fixed
+- **Paths frozen at module load**: cached(p('inject.md'), ...) captured DSH_USER_PROFILE_HOME at import time, so changing the data directory (tests, profile switching, MCP process reuse) still injected the previous user's portrait. All four readers (inject.md, profile.md, config.json, profile.json) now resolve the path per call and cache per final path.
+- **export const inject = ['loader'] was a hard dependency**: hosts without loader refused to load the plugin at all. Now [], with runtime detection.
+- **Client apply threw without slots**: hosts lacking settings.section lost the whole settings page instead of one tab. Now guarded; inject no longer declares slots.
+- _render.mjs assertion that froze the old inject = ['slots'] contract.
+
+#### Tests
+- New _compat.mjs (11 checks) and _audit4.mjs (22 checks); both wired into scripts/register.mjs and CI.
+- Full suite: selftest, audit 33, audit2 34, audit3 51, audit4 22, compat 11, render, e2e --cli-only 26, verify-install 13, node --check 13 files.
+
+
+
 ### v17 — reorganised around a six-step memory pipeline
 
 ### Added

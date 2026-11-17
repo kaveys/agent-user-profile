@@ -1138,17 +1138,28 @@ window.__ModuleLoader__.load({
       return h('div', { style: styles.wrap }, header, warningsLine, noticeLine, tabBar, body)
     }
 
-    // `exports.inject = ['slots']` 只是激活顺序提示，不改变依赖注入。
-    const inject = ['slots']
+    // 不声明硬依赖：缺 slots 的宿主也应当能加载本 bundle（apply 内部再做能力判断）。
+    const inject = []
 
-    /** settings.section 由 @deepseek-ai/dsh-client-ui-settings 声明；本插件只贡献一个页签。 */
+    /**
+     * settings.section 由 @deepseek-ai/dsh-client-ui-settings 声明；本插件只贡献一个页签。
+     * 老宿主的 client 端可能没有 slots 服务（或没有这个槽位）：这时静默退出，
+     * 绝不能在 apply 里抛——抛出去会让整个设置页挂掉，而用户只是少了一个页签。
+     */
     function apply(ctx) {
-      ctx.slots.inject('settings.section', () => ctx.slots.register({
-        name: 'settings.section',
-        id: 'user-profile',
-        order: 55,
-        label: () => '用户画像',
-      }, ProfileSection))
+      try {
+        if (typeof ctx?.slots?.inject !== 'function' || typeof ctx?.slots?.register !== 'function') return
+        ctx.slots.inject('settings.section', () => ctx.slots.register({
+          name: 'settings.section',
+          id: 'user-profile',
+          order: 55,
+          label: () => '用户画像',
+        }, ProfileSection))
+      } catch (error) {
+        if (typeof console !== 'undefined' && console.warn) {
+          console.warn('[dsh-user-profile] 设置页注册失败（宿主可能没有 settings.section 槽位）：', error?.message ?? error)
+        }
+      }
     }
 
     exports.apply = apply

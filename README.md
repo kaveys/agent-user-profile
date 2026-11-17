@@ -98,6 +98,25 @@ cmd /c mklink /J "<home>\.dsh\profiles\desktop\node_modules\dsh-user-profile" "<
 `package.json` 里 `dsh.client = { platform: "web", inject: ["@deepseek-ai/dsh-client-ui-settings"] }`、
 `exports["./client"] = "./client.js"`，`files` 里带上 `client.js` —— 这三处缺一个，设置页就不会出现本插件。
 
+## 宿主兼容（v19）
+
+插件按**能力探测**运行，不按版本号：宿主少一个服务，就关掉对应功能，其余照常。
+
+```bash
+node bin/profile.mjs doctor   # 这一版宿主到底给了什么、哪一项现在不可用
+```
+
+| 宿主缺什么 | 结果 |
+| --- | --- |
+| `agent/pre-step` | 不自动叠加画像（其它照常） |
+| `session/event` | 不采集对话与工具调用，只能 CLI / MCP 维护 |
+| `webServer` / `connection` | 设置页读不到数据 / 面板没有 cookie 校验（都写进 `.host.json`） |
+| `llm` | 不自动提炼条目，行为信号与手工条目照常 |
+| 客户端 `slots` | 设置页少一个页签，客户端 `apply` 静默返回不抛 |
+
+事件名也做了别名收敛（`tool_call` / `tool-call` / `tool/call` 视为同一件事），老宿主的事件名不会被当成脏数据丢掉。
+完整矩阵、探测方式与不可兼容项见 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)。
+
 ## 用法
 
 ```bash
@@ -295,6 +314,8 @@ node _e2e.mjs                 # 42 项真实 CLI 与 HTTP 动作自检（会打�
 node _audit.mjs               # 33 项对抗式边界检查（脏输入 / 冲突操作 / 锁 / 作用域）
 node _audit2.mjs              # 34 项往返与极限（导出→重置→导入 / 坏行 / 坏配置 / 快照上限 / 并发）
 node _audit3.mjs              # 51 项逻辑一致性（预算与排序 / 闸门顺序 / MCP 协议 / 面板自洽）
+node _audit4.mjs              # 22 项兼容层自身（能力文件 / doctor / 别名事件 / 降级不崩 / 旧配置迁移）
+node _compat.mjs              # 11 项残缺宿主（只有 ctx.on / 缺 pre-step / 无 ctx.on / 无 next / 旧事件名）
 node _render.mjs             # 面板渲染烟测：7 个页签逐个点 + payload 洁净度
 node scripts/verify-install.mjs   # 13 项安装体检（不重启、不起 dsh）
 ```

@@ -1,6 +1,6 @@
 {
   "name": "dsh-user-profile",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Agent user-profile layer: distill durable preferences into a weighted portrait, overlay it on every task, and let the user opt out for a single turn.",
@@ -31,14 +31,16 @@
     "dsh-profile": "./bin/profile.mjs"
   },
   "files": [
-    "index.js",
-    "client.js",
-    "bin/profile.mjs",
-    "cordis.patch.yml",
-    "README.md",
     "DESIGN.md",
     "LICENSE",
-    "docs/POSITIONING.md"
+    "README.md",
+    "bin/profile.mjs",
+    "client.js",
+    "cordis.patch.yml",
+    "docs/COMPATIBILITY.md",
+    "docs/POSITIONING.md",
+    "index.js",
+    "mcp/server.mjs"
   ],
   "exports": {
     ".": "./index.js",
@@ -54,6 +56,11 @@
       "inject": [
         "@deepseek-ai/dsh-client-ui-settings"
       ]
+    },
+    "compat": {
+      "hosts": ">=0.2.0",
+      "strategy": "capability-probe",
+      "notes": "Missing host services degrade features; run `profile doctor` to see what is unavailable."
     }
   },
   "engines": {

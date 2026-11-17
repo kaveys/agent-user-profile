@@ -30,6 +30,8 @@ jobs:
           node --check _audit.mjs
           node --check _audit2.mjs
           node --check _audit3.mjs
+          node --check _audit4.mjs
+          node --check _compat.mjs
           node --check _render.mjs
 
       - name: Unit tests (storage / conflicts / injection)
@@ -43,6 +45,8 @@ jobs:
 
       - name: Adversarial audit 3 (logic: budget / gates / MCP / panel consistency)
         run: node _audit3.mjs
+          node _audit4.mjs
+          node _compat.mjs
 
       - name: Panel render smoke test
         run: node _render.mjs

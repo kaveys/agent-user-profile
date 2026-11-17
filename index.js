@@ -13,14 +13,14 @@
  *
  * 所有 IO 都包在 try/catch 里：插件绝不能因为画像坏了而挡住用户的正常任务。
  */
-import { appendFileSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { execFile, execFileSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir, tmpdir } from 'node:os'
 
 export const name = 'dsh-user-profile'
-export const inject = ['loader']
+export const inject = []
 
 /** 注入块指纹：用于同一步骤内去重。 */
 const MARKER = '<!--dsh-user-profile-->'
@@ -171,7 +171,7 @@ function cached(file, parse) {
   }
 }
 
-const readConfig = cached(p('config.json'), (text) => {
+const parseConfig = (text) => {
   const raw = JSON.parse(text)
   return {
     ...DEFAULT_CONFIG,
@@ -184,13 +184,45 @@ const readConfig = cached(p('config.json'), (text) => {
       ? raw.suppressPatterns
       : DEFAULT_CONFIG.suppressPatterns,
   }
-})
+}
 
-const readPortrait = cached(p('profile.json'), (text) => JSON.parse(text))
+const parseProfile = (text) => JSON.parse(text)
 // 注入正文优先用 build 预渲染的 inject.md（已做「核心必进 + 其余 topK」两段式预算），
 // 缺失时退回 profile.md（老版本产物，由 buildBlock 兜底截断）。
-const readInjectMd = cached(p('inject.md'), (text) => text)
-const readPortraitMd = cached(p('profile.md'), (text) => text)
+/**
+ * 注意：路径必须每次调用时再算。
+ * 旧写法把 p('inject.md') 放在 cached(...) 的参数里，模块加载那一刻就把 DSH_USER_PROFILE_HOME
+ * 固化进了路径；之后再改环境变量（测试隔离、宿主切换 profile、MCP 子进程复用同一模块）
+ * 都会读回旧目录——表现就是「换了数据目录，注入的还是上一个用户的画像」。
+ * 缓存按最终路径分桶，才不会串。
+ */
+/**
+ * 通用惰性缓存：路径在调用时再算，缓存按最终路径分桶。
+ * 原因见下面 cachedText 的注释——cached(p(...)) 会把模块加载时的环境变量固化。
+ */
+const jsonCache = new Map()
+function cachedJson(file, parse) {
+  let reader = jsonCache.get(file)
+  if (reader === undefined) {
+    reader = cached(file, parse)
+    jsonCache.set(file, reader)
+  }
+  return reader()
+}
+
+const mdCache = new Map()
+function cachedText(file) {
+  let reader = mdCache.get(file)
+  if (reader === undefined) {
+    reader = cached(file, (text) => text)
+    mdCache.set(file, reader)
+  }
+  return reader()
+}
+const readInjectMd = () => cachedText(p('inject.md'))
+const readPortraitMd = () => cachedText(p('profile.md'))
+const readConfig = () => cachedJson(p('config.json'), parseConfig)
+const readPortrait = () => cachedJson(p('profile.json'), parseProfile)
 
 function portraitText() {
   const inject = readInjectMd()
@@ -409,10 +441,82 @@ function buildBlock(md, portrait, cfg, personalizing = false) {
   return lines.join('\n')
 }
 
+/**
+ * 宿主兼容层：不同 DSH 版本的事件名/服务名不完全一致，这里把已知别名收敛成规范名。
+ * 只做「同义归一」，不做猜测——名字对不上就照原样返回，交给 switch 的 default 忽略。
+ */
+const EVENT_ALIASES = new Map([
+  ['tool_call', 'tool/call'],
+  ['toolCall', 'tool/call'],
+  ['tool-call', 'tool/call'],
+  ['tool_result', 'tool/result'],
+  ['toolResult', 'tool/result'],
+  ['tool-result', 'tool/result'],
+  ['turn_start', 'turn/start'],
+  ['turnStart', 'turn/start'],
+  ['turn_end', 'turn/end'],
+  ['turnEnd', 'turn/end'],
+  ['user_message', 'user/message'],
+  ['userMessage', 'user/message'],
+  ['assistant_message', 'assistant/message'],
+  ['assistantMessage', 'assistant/message'],
+  ['request_header', 'request/header'],
+  ['requestHeader', 'request/header'],
+])
+const canonicalEventType = (type) => (typeof type === 'string' ? (EVENT_ALIASES.get(type) ?? type) : '')
+
 export function apply(ctx, config0) {
   const debug = process.env.DSH_USER_PROFILE_LOG === '1'
   const log = (...args) => {
     if (debug) console.log('[dsh-user-profile]', ...args)
+  }
+
+  /**
+   * 能力探测：每个宿主版本提供的服务不一样，插件必须能「少给一半 API 也照常跑」。
+   * 所有降级都在这里留痕，并落盘成 .host.json，CLI 的 `profile doctor` 直接读它。
+   */
+  const caps = {
+    plugin: 'cordis',
+    sessionEvents: false,
+    preStep: false,
+    webServer: false,
+    connection: false,
+    llm: false,
+    loader: typeof ctx?.loader?.import === 'function',
+    hooksFailed: [],
+  }
+  const hostCapsFile = () => join(process.env.DSH_USER_PROFILE_HOME || join(homedir(), '.dsh', 'user-profile'), '.host.json')
+  let capsWritten = ''
+  function writeHostCaps(extra = {}) {
+    try {
+      const payload = {
+        at: new Date().toISOString(),
+        plugin: 'dsh-user-profile',
+        node: process.versions?.node,
+        ...caps,
+        ...extra,
+      }
+      const text = JSON.stringify(payload, null, 2)
+      if (text === capsWritten) return
+      const file = hostCapsFile()
+      const dir = dirname(file)
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+      writeFileSync(file, `${text}\n`, 'utf8')
+      capsWritten = text
+    } catch (error) {
+      log('write .host.json failed', error?.message)
+    }
+  }
+  /** 老宿主可能没有某个事件主题：注册失败不该把整个插件拖下水。 */
+  function onSafe(topic, handler, flagKey) {
+    try {
+      if (typeof ctx?.on !== 'function') throw new Error('ctx.on 不存在')
+      ctx.on(topic, handler)
+      if (flagKey) caps[flagKey] = true
+    } catch (error) {
+      caps.hooksFailed.push(`${topic}: ${error?.message ?? error}`)
+      log(`无法注册 ${topic}`, error?.message)
+    }
   }
 
   // ------------------------------------------------------------ 设置页面板的数据源
@@ -723,11 +827,18 @@ const ACTION_ROUTE = '/user-profile/action'
   if (typeof ctx.inject === 'function') {
     try {
       // 'llm' 是宿主模型服务；拿不到就退化成「只有行为信号」，不阻塞任务。
-      ctx.inject(['llm'], (inner) => { llmRef = inner?.llm })
+      ctx.inject(['llm'], (inner) => {
+        llmRef = inner?.llm
+        caps.llm = typeof llmRef?.prepareCall === 'function'
+        if (!caps.llm) log('llm service present but has no prepareCall: extraction disabled')
+        writeHostCaps()
+      })
     } catch (error) {
       log('llm service unavailable', error?.message)
     }
   }
+  // 有些老宿主连 ctx.llm 都没有：同步探测一次，让 .host.json 一开始就说清能不能提炼。
+  if (typeof ctx?.llm?.prepareCall === 'function') caps.llm = true
   const llmService = () => llmRef ?? ctx.llm
 
   let llmModule
@@ -1100,10 +1211,10 @@ const ACTION_ROUTE = '/user-profile/action'
     }
   }
 
-  ctx.on('session/event', (session, event) => {
+  onSafe('session/event', (session, event) => {
     try {
       if (session === undefined) return
-      switch (event?.type) {
+      switch (canonicalEventType(event?.type)) {
         case 'session':
           // 首条事件带着真正的会话 id；记下来，provenance 才有得归因。
           if (typeof event?.data?.id === 'string' && event.data.id.length > 0) {
@@ -1158,10 +1269,11 @@ const ACTION_ROUTE = '/user-profile/action'
     } catch (error) {
       log('session/event failed', error?.message)
     }
-  })
+  }, 'sessionEvents')
 
-  ctx.on('agent/pre-step', async (payload, next) => {
-    const decision = await next()
+  onSafe('agent/pre-step', async (payload, next) => {
+    // 老宿主可能不传 next（当成纯通知），这时按「不拦不改」处理，别把这一步吞掉。
+    const decision = typeof next === 'function' ? await next() : payload?.decision
     try {
       if (decision?.kind === 'reject') return decision
       const agent = payload?.agent
@@ -1238,12 +1350,19 @@ const ACTION_ROUTE = '/user-profile/action'
       log('pre-step failed', error?.message)
       return decision
     }
-  })
+  }, 'preStep')
 
   // 面板数据走同源 HTTP：client 插件（client.js）只负责渲染，不重复实现排序。
   if (typeof ctx.inject === 'function') {
     try {
       ctx.inject(['webServer', 'connection'], (web, connection) => {
+        // webServer 有 = 面板可用；connection 没有 = 老宿主没有鉴权服务，
+        // 这种情况下接口仍然注册（本机可用），但把降级写进 .host.json，
+        // 让人知道「这次没做 cookie 校验」是因为宿主没提供，而不是我忘了。
+        caps.webServer = typeof web?.webServer?.register === 'function'
+        caps.connection = typeof connection?.requestRejection === 'function'
+        if (!caps.connection) log('connection service missing: panel route runs without cookie fence')
+        writeHostCaps()
         /**
          * 面板里有画像正文，属于会话私有数据：先过 Web 宿主的鉴权闸门
          * （cookie 网关 + Host/Origin fence），未授权的本机进程读不到。
@@ -1285,5 +1404,17 @@ const ACTION_ROUTE = '/user-profile/action'
       // 没有 webServer（纯 CLI / 测试环境）时面板接口缺席，不影响画像注入。
       log('webServer unavailable, panel route skipped', error?.message)
     }
+  }
+
+  // 收尾：把这一版宿主的真实能力写下来，并只在有降级时提示一句。
+  writeHostCaps()
+  const degraded = []
+  if (!caps.sessionEvents) degraded.push('采集（session/event）')
+  if (!caps.preStep) degraded.push('画像注入（agent/pre-step）')
+  if (!caps.webServer) degraded.push('设置页面板路由（webServer）')
+  if (!caps.connection) degraded.push('面板鉴权（connection）')
+  if (!caps.llm) degraded.push('智能提取（llm）')
+  if (degraded.length > 0) {
+    console.log(`[dsh-user-profile] 当前宿主缺少：${degraded.join('、')}；插件已按可用能力降级运行，运行 profile doctor 查看详情。`)
   }
 }

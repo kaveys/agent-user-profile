@@ -23,7 +23,7 @@ import {
   writeFileSync,
   writeSync,
 } from 'node:fs'
-import { basename, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto'
@@ -2056,6 +2056,61 @@ function cmdRestore({ flags }) {
   process.stdout.write(`已从 ${name} 恢复 ${rows.length} 条（画像已刷新）\n`)
 }
 
+function cmdDoctor({ flags }) {
+  const caps = readJson(p('.host.json'), undefined)
+  const config = loadConfig()
+  const lines = []
+  const say = (label, text) => lines.push(`${label.padEnd(12)} ${text}`)
+
+  let selfVersion = '（未知）'
+  try {
+    selfVersion = readJson(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), undefined)?.version ?? selfVersion
+  } catch (error) {
+    void error
+  }
+  say('插件', `dsh-user-profile v${selfVersion}`)
+  say('Node', process.versions.node)
+  say('数据目录', HOME)
+
+  if (caps === undefined) {
+    say('宿主能力', '还没有宿主写过 .host.json（插件未加载过，或宿主跑的是还没写能力文件的旧版插件）')
+    lines.push('')
+    lines.push('  这说明：画像采集/注入/面板此刻都不会自动发生，但 CLI 与 MCP 仍然可用。')
+    lines.push('  让宿主写一次：重启一次 dsh（插件启动即写），再运行 profile doctor。')
+    lines.push('  如果重启后仍然没有：确认安装的是 0.3.0 及以上（旧版不会写这个文件）。')
+  } else {
+    say('宿主记录', `${caps.at ?? '未知时间'}（plugin=${caps.plugin ?? '?'}，node=${caps.node ?? '?'}）`)
+    const cap = (label, ok, consequence) => say(label, `${ok ? '可用' : '缺失 → ' + consequence}`)
+    cap('采集', caps.sessionEvents === true, '不会自动记录每轮对话与工具调用，画像只能靠 declare/import 手工维护')
+    cap('注入', caps.preStep === true, '不会在任务开始前自动叠加画像，需要手工把 inject.md 内容给模型')
+    cap('面板路由', caps.webServer === true, '设置页里的「用户画像」会读不到数据（页面本身还在）')
+    cap('面板鉴权', caps.connection === true, '面板接口没有 cookie 校验，仅限本机访问时依靠端口不暴露')
+    cap('智能提取', caps.llm === true, '不会自动从对话里提炼条目，新偏好需手工 declare')
+    cap('模块加载', caps.loader === true, '降级为纯行为采集，提取所需的 LLM 组装件拿不到')
+    if (Array.isArray(caps.hooksFailed) && caps.hooksFailed.length > 0) {
+      say('注册失败', caps.hooksFailed.join('；'))
+    }
+  }
+
+  lines.push('')
+  say('画像', (() => {
+    const profile = readJson(p('profile.json'), undefined)
+    if (profile === undefined) return '未生成（运行 profile build）'
+    return `v${profile.revision} · ${profile.status} · ${profile.stats?.items ?? 0} 条`
+  })())
+  say('声明', `${readJsonl(p('declarations.jsonl')).length} 条`)
+  say('待审', `${countPending()} 条`)
+  say('注入', `mode=${config.inject.mode}，预算=${config.inject.maxChars > 0 ? config.inject.maxChars + ' 字' : '不限'}，相关过滤=${config.inject.relevantOnly === false ? '关' : '开'}`)
+  say('脱敏', `mode=${config.redaction.mode}，预设=${(config.redaction.presets ?? []).join('/') || '无'}`)
+  say('备份', config.backup?.webdav?.enabled ? `WebDAV 已配置（${config.backup.webdav.url}）` : 'WebDAV 未配置（仍可用 --out 本地导出）')
+
+  if (flags?.json === true) {
+    process.stdout.write(`${JSON.stringify({ caps, home: HOME, node: process.versions.node }, null, 2)}\n`)
+    return
+  }
+  process.stdout.write(`${lines.join('\n')}\n`)
+}
+
 function cmdStatus({ flags }) {
   const config = loadConfig()
   const profile = readJson(p('profile.json'), undefined)
@@ -2597,6 +2652,7 @@ const COMMANDS = {
   build: cmdBuild,
   show: cmdShow,
   status: cmdStatus,
+  doctor: cmdDoctor,
   panel: cmdPanel,
   review: cmdReview,
   forget: cmdForget,

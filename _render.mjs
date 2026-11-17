@@ -124,7 +124,14 @@ const mod = captured.factory((name) => {
   throw new Error(`factory 试图 require 宿主包：${name}`)
 })
 check('导出 apply', typeof mod.apply === 'function')
-check('导出 inject = [slots]', Array.isArray(mod.inject) && mod.inject[0] === 'slots')
+check('导出 inject 不依赖宿主客户端包', Array.isArray(mod.inject) && mod.inject.every((dep) => !String(dep).startsWith('@deepseek-ai/')))
+let applyWithoutSlotsThrew = null
+try {
+  mod.apply({})
+} catch (error) {
+  applyWithoutSlotsThrew = error
+}
+check('没有 slots 的宿主：apply 不抛', applyWithoutSlotsThrew === null, applyWithoutSlotsThrew?.message)
 
 // ---------------------------------------------------------------- 抓注册的组件
 
