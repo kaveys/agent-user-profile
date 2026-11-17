@@ -7,8 +7,9 @@
 
 param(
   [string]$OutFile = 'docs/video/agent-user-profile.mp4',
-  [string]$Voice   = 'zh-CN-XiaoxiaoNeural',
-  [string]$Rate    = '-4%',
+  [string]$Engine  = 'kokoro',
+  [string]$Voice   = 'zf_xiaoxiao',
+  [string]$Speed   = '0.92',
   [switch]$NoTtsRefresh
 )
 
@@ -16,8 +17,20 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Speech
 
-$Ffmpeg  = if ($env:FFMPEG) { $env:FFMPEG } else { 'ffmpeg.exe' }
-$Ffprobe = Join-Path (Split-Path $Ffmpeg) 'ffprobe.exe'
+# ffmpeg / ffprobe：优先环境变量，其次 PATH（不写死本机路径）
+function Resolve-Tool {
+  param([string]$EnvName, [string]$Name)
+  if ([Environment]::GetEnvironmentVariable($EnvName)) { return [Environment]::GetEnvironmentVariable($EnvName) }
+  $cmd = Get-Command $Name -ErrorAction SilentlyContinue
+  if ($cmd) { return $cmd.Source }
+  return $Name
+}
+$Ffmpeg  = Resolve-Tool 'FFMPEG' 'ffmpeg'
+$Ffprobe = Resolve-Tool 'FFPROBE' 'ffprobe'
+if ($env:FFMPEG -and -not $env:FFPROBE) {
+  $sibling = Join-Path (Split-Path $env:FFMPEG -Parent) 'ffprobe.exe'
+  if (Test-Path $sibling) { $Ffprobe = $sibling }
+}
 $Root    = Split-Path -Parent $PSScriptRoot
 $Work    = Join-Path $PSScriptRoot 'trailer-build'
 New-Item -ItemType Directory -Force -Path $Work | Out-Null
@@ -283,18 +296,21 @@ $Scenes = @(
 
 # ---------------------------------------------------------------- 配音
 $Py = Get-Command python -ErrorAction SilentlyContinue
-function Test-EdgeTts {
+function Test-Tts {
+  param([string]$Which)
   if (-not $Py) { return $false }
-  & $Py -c "import edge_tts" 2>$null | Out-Null
+  $mod = if ($Which -eq 'kokoro') { 'kokoro' } else { 'edge_tts' }
+  & $Py -c "import $mod" 2>$null | Out-Null
   return ($LASTEXITCODE -eq 0)
 }
-$useEdge = (Test-EdgeTts) -and (-not $NoTtsRefresh)
+$useKokoro = ($Engine -eq 'kokoro') -and (Test-Tts 'kokoro') -and (-not $NoTtsRefresh)
+$useEdge   = (-not $useKokoro) -and ($Engine -eq 'edge') -and (Test-Tts 'edge') -and (-not $NoTtsRefresh)
 
 # 复用仓库里的 scripts/tts.py，不在构建目录里另写一份
 $ttsPy = Join-Path $Root 'scripts/tts.py'
-if ($useEdge -and -not (Test-Path $ttsPy)) { throw "缺少 $ttsPy" }
+if (($useKokoro -or $useEdge) -and -not (Test-Path $ttsPy)) { throw "缺少 $ttsPy" }
 
-Write-Host ("配音引擎：" + $(if ($useEdge) { "edge-tts ($Voice, rate $Rate)" } else { "系统语音 Huihui" }))
+Write-Host ("配音引擎：" + $(if ($useKokoro) { "kokoro 本地模型 ($Voice, speed $Speed)" } elseif ($useEdge) { "edge-tts ($Voice, speed $Speed)" } else { "系统语音 Huihui" }))
 
 # ---------------------------------------------------------------- 逐场渲染
 $segments = @(); $srts = @(); $timeline = @()
@@ -314,12 +330,24 @@ foreach ($scene in $Scenes) {
     $gfx.Dispose(); $bmp.Save($png, [Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
   }
 
-  if ($useEdge) {
+  if ($useKokoro -or $useEdge) {
     if (-not (Test-Path $wav)) {
       Set-Content $txt $scene.Narration -Encoding UTF8
-      & $Py $ttsPy $txt $mp3 $Voice $Rate
-      if ($LASTEXITCODE -ne 0 -or -not (Test-Path $mp3)) { throw "edge-tts 合成失败：$($scene.Name)" }
-      & $Ffmpeg -y -loglevel error -i $mp3 -ar 44100 -ac 1 $wav
+      if ($useKokoro) {
+        & $Py $ttsPy $txt $wav kokoro $Voice $Speed
+      } else {
+        & $Py $ttsPy $txt $mp3 edge $Voice $Speed
+      }
+      if ($LASTEXITCODE -ne 0) { throw "配音失败：$($scene.Name)" }
+      if (Test-Path $mp3) {
+        # 本地模型不可用时 tts.py 会退回 edge 并留下 mp3
+        & $Ffmpeg -y -loglevel error -i $mp3 -ar 44100 -ac 1 $wav
+      } else {
+        $tmp44 = Join-Path $Work ("{0}.44k.wav" -f $scene.Name)
+        & $Ffmpeg -y -loglevel error -i $wav -ar 44100 -ac 1 $tmp44
+        Move-Item -Force $tmp44 $wav
+      }
+      if (-not (Test-Path $wav)) { throw "配音文件未生成：$($scene.Name)" }
     }
   } elseif (-not (Test-Path $wav)) {
     $sp = New-Object System.Speech.Synthesis.SpeechSynthesizer
