@@ -1,7 +1,0 @@
-file '01-hook.mp4'
-file '02-pain.mp4'
-file '03-what.mp4'
-file '04-categories.mp4'
-file '05-control.mp4'
-file '06-payoff.mp4'
-file '07-outro.mp4'
