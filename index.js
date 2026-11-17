@@ -26,6 +26,22 @@ export const inject = []
 const MARKER = '<!--dsh-user-profile-->'
 
 /**
+ * 诊断落盘（v19.1）：宿主没有日志面板，出问题时唯一能查的就是我们自己写的这行。
+ * 只在 DSH_PROFILE_DIAG=0 时关闭；文件固定在数据目录的 diag.log，最多几百行。
+ */
+const DIAG_FILE = () => join(process.env.DSH_USER_PROFILE_HOME || join(homedir(), '.dsh', 'user-profile'), 'diag.log')
+function diag(...parts) {
+  if (process.env.DSH_PROFILE_DIAG === '0') return
+  try {
+    const line = `${new Date().toISOString()} [${process.pid}] ${parts.join(' ')}`
+    appendFileSync(DIAG_FILE(), `${line}\n`)
+  } catch {
+    /* 诊断本身绝不能影响主流程 */
+  }
+}
+diag('module loaded', new URL(import.meta.url).pathname.slice(-24), 'v' + process.env.DSH_PROFILE_DIAG_TAG)
+
+/**
  * 画像十大类（与 bin/profile.mjs 的 DIMENSIONS 同源）。
  * 划分依据：一类只回答一个问题 —— 他是谁 / 在哪做什么 / 会什么 / 何时怎么做事 /
  * 喜欢什么 / 喜欢什么样 / 要达成什么 / 和谁 / 什么不能碰 / 要我怎么说。
@@ -466,6 +482,7 @@ const EVENT_ALIASES = new Map([
 const canonicalEventType = (type) => (typeof type === 'string' ? (EVENT_ALIASES.get(type) ?? type) : '')
 
 export function apply(ctx, config0) {
+  diag('apply start')
   const debug = process.env.DSH_USER_PROFILE_LOG === '1'
   const log = (...args) => {
     if (debug) console.log('[dsh-user-profile]', ...args)
@@ -1273,7 +1290,9 @@ const ACTION_ROUTE = '/user-profile/action'
 
   onSafe('agent/pre-step', async (payload, next) => {
     // 老宿主可能不传 next（当成纯通知），这时按「不拦不改」处理，别把这一步吞掉。
-    const decision = typeof next === 'function' ? await next() : payload?.decision
+    const nextIsFn = typeof next === 'function'
+    diag('pre-step called', 'next=' + nextIsFn, 'step=' + String(payload?.step), 'session=' + (payload?.agent?.session !== undefined))
+    const decision = nextIsFn ? await next() : payload?.decision
     try {
       if (decision?.kind === 'reject') return decision
       const agent = payload?.agent
@@ -1286,8 +1305,10 @@ const ACTION_ROUTE = '/user-profile/action'
       // 画像只在每轮第一个可用步骤注入；turn/start 没来（老会话/resume）时退回 step===1。
       const flagged = session !== undefined && pendingInject.has(session)
       const firstStep = payload?.step === 1
+      const injectedBefore = alreadyInjected(messages)
+      diag('pre-step gate', 'flagged=' + flagged, 'firstStep=' + firstStep, 'already=' + injectedBefore, 'enabled=' + (cfg.enabled !== false))
       let portraitBlock = ''
-      if ((flagged || firstStep) && !alreadyInjected(messages)) {
+      if ((flagged || firstStep) && !injectedBefore) {
         if (flagged) pendingInject.delete(session)
         const portrait = readPortrait()
         const { text: md, source: mdSource } = portraitText()
@@ -1345,8 +1366,10 @@ const ACTION_ROUTE = '/user-profile/action'
           source: { kind: 'agent-instructions', form: 'instructions', changes: [] },
         }
       }
+      diag('pre-step inject', 'chars=' + text.length)
       return { ...decision, messages: [...messages, message] }
     } catch (error) {
+      diag('pre-step failed', String(error?.message))
       log('pre-step failed', error?.message)
       return decision
     }
@@ -1408,6 +1431,7 @@ const ACTION_ROUTE = '/user-profile/action'
 
   // 收尾：把这一版宿主的真实能力写下来，并只在有降级时提示一句。
   writeHostCaps()
+  diag('apply done', JSON.stringify(caps), 'hostFile=' + hostCapsFile())
   const degraded = []
   if (!caps.sessionEvents) degraded.push('采集（session/event）')
   if (!caps.preStep) degraded.push('画像注入（agent/pre-step）')

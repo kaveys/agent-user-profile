@@ -1139,7 +1139,7 @@ window.__ModuleLoader__.load({
     }
 
     // 不声明硬依赖：缺 slots 的宿主也应当能加载本 bundle（apply 内部再做能力判断）。
-    const inject = []
+    const inject = ['slots']
 
     /**
      * settings.section 由 @deepseek-ai/dsh-client-ui-settings 声明；本插件只贡献一个页签。

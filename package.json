@@ -56,11 +56,6 @@
       "inject": [
         "@deepseek-ai/dsh-client-ui-settings"
       ]
-    },
-    "compat": {
-      "hosts": ">=0.2.0",
-      "strategy": "capability-probe",
-      "notes": "Missing host services degrade features; run `profile doctor` to see what is unavailable."
     }
   },
   "engines": {
