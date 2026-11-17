@@ -482,7 +482,24 @@ const EVENT_ALIASES = new Map([
 const canonicalEventType = (type) => (typeof type === 'string' ? (EVENT_ALIASES.get(type) ?? type) : '')
 
 export function apply(ctx, config0) {
+  // 宿主侧加载失败的代价是「整个插件消失」，比功能降级严重得多。
+  // 所以这里再兜一层：异常只记诊断，绝不向外抛。
   diag('apply start')
+  try {
+    applyInner(ctx, config0)
+    diag('apply returned')
+  } catch (error) {
+    const detail = error && error.stack ? String(error.stack).slice(0, 1200) : String(error)
+    diag('apply threw', detail.replace(/\n/g, ' | '))
+    try {
+      console.error('[dsh-user-profile] apply failed:', error?.message ?? error)
+    } catch {
+      /* 连 console 都没有就算了 */
+    }
+  }
+}
+
+function applyInner(ctx, config0) {
   const debug = process.env.DSH_USER_PROFILE_LOG === '1'
   const log = (...args) => {
     if (debug) console.log('[dsh-user-profile]', ...args)
@@ -499,7 +516,7 @@ export function apply(ctx, config0) {
     webServer: false,
     connection: false,
     llm: false,
-    loader: typeof ctx?.loader?.import === 'function',
+    loader: hasMethod('loader', 'import'),
     hooksFailed: [],
   }
   const hostCapsFile = () => join(process.env.DSH_USER_PROFILE_HOME || join(homedir(), '.dsh', 'user-profile'), '.host.json')
@@ -525,12 +542,34 @@ export function apply(ctx, config0) {
     }
   }
   /** 老宿主可能没有某个事件主题：注册失败不该把整个插件拖下水。 */
+
+  /**
+   * 安全探测服务：cordis 的 ctx 上取未就绪服务会直接抛（不是返回 undefined），
+   * 所以任何能力探测都必须包一层 try，否则「探测」本身会把插件加载搞挂。
+   */
+  function serviceOf(name) {
+    try {
+      return ctx?.[name]
+    } catch {
+      return undefined
+    }
+  }
+  function hasMethod(service, method) {
+    try {
+      const target = serviceOf(service)
+      return typeof target?.[method] === 'function'
+    } catch {
+      return false
+    }
+  }
   function onSafe(topic, handler, flagKey) {
     try {
-      if (typeof ctx?.on !== 'function') throw new Error('ctx.on 不存在')
-      ctx.on(topic, handler)
+      const on = serviceOf('on')
+      if (typeof on !== 'function') throw new Error('ctx.on 不存在')
+      on.call(ctx, topic, handler)
       if (flagKey) caps[flagKey] = true
     } catch (error) {
+      diag('hook register failed', topic, String(error?.message ?? error))
       caps.hooksFailed.push(`${topic}: ${error?.message ?? error}`)
       log(`无法注册 ${topic}`, error?.message)
     }
@@ -855,7 +894,7 @@ const ACTION_ROUTE = '/user-profile/action'
     }
   }
   // 有些老宿主连 ctx.llm 都没有：同步探测一次，让 .host.json 一开始就说清能不能提炼。
-  if (typeof ctx?.llm?.prepareCall === 'function') caps.llm = true
+  if (hasMethod('llm', 'prepareCall')) caps.llm = true
   const llmService = () => llmRef ?? ctx.llm
 
   let llmModule
@@ -1382,8 +1421,8 @@ const ACTION_ROUTE = '/user-profile/action'
         // webServer 有 = 面板可用；connection 没有 = 老宿主没有鉴权服务，
         // 这种情况下接口仍然注册（本机可用），但把降级写进 .host.json，
         // 让人知道「这次没做 cookie 校验」是因为宿主没提供，而不是我忘了。
-        caps.webServer = typeof web?.webServer?.register === 'function'
-        caps.connection = typeof connection?.requestRejection === 'function'
+        caps.webServer = (() => { try { return typeof web?.webServer?.register === 'function' } catch { return false } })()
+        caps.connection = (() => { try { return typeof connection?.requestRejection === 'function' } catch { return false } })()
         if (!caps.connection) log('connection service missing: panel route runs without cookie fence')
         writeHostCaps()
         /**
