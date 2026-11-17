@@ -121,7 +121,7 @@ const fakeCtx = (opts = {}) => {
   const result = await preStep({ agent: { session } }, async () => decision)
   const text = (result?.messages ?? []).map((m) => JSON.stringify(m)).join('\n')
   check('注入块仍然带插件规定', /插件规定/.test(text))
-  check('相关性过滤：无关的兴趣条目被挡在外', !/公路车配件/.test(text) || /与本次无关/.test(text))
+  check('相关性过滤：无关条目要么被挡在外，要么被明确标成保底带入', !/公路车配件/.test(text) || /与本次无关/.test(text) || /保底带入/.test(text))
   const built = JSON.parse(readFileSync(join(dir, 'profile.json'), 'utf8'))
   check('画像已进入 ready（否则注入按设计为空）', built.status === 'ready', `status=${built.status} items=${built.stats?.items} evidence=${built.stats?.evidence}`)
   const diag = [

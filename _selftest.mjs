@@ -151,14 +151,28 @@ const plain = await step([{ role: 'user', content: [{ type: 'text', text: '把�
 check('同轮不重复注入（个性化块不叠加）', plain.messages.length === perso.messages.length)
 
 // 5.7 相关性检索：只带本轮相关的条目，红线永远带
+// 先把画像撑到 6 条以上，否则「保底」会覆盖全部条目，测不出闸门在筛
+for (const topic of ['界面要留白', '配色偏冷色', '排版要紧凑', '字体偏大', '动效要克制', '图标用线性']) {
+  run('declare', '--dim', 'taste', '--fact', `用户偏好${topic}`, '--force', '--no-merge')
+}
+run('build')
 const sRel = { id: 'sRel' }
 emit('session/event', sRel, { type: 'turn/start' })
 const unrelated = await step([{ role: 'user', content: [{ type: 'text', text: '帮我看看这个玄学问题：为什么随机数不随机' }] }], { agent: { session: sRel } })
 const unrelatedText = unrelated.messages.at(-1).content[0].text
-check('相关性闸门：无关条目被挡在外面并说明条数', unrelatedText.includes('未带入') || !unrelatedText.includes('偏好中文回答'))
+check('相关性闸门：仍然挡掉尾部并说明条数（保底只补到 60%）', unrelatedText.includes('未带入'))
 check('相关性闸门：红线仍然带入', unrelatedText.includes('红线与硬要求'))
 check('相关性闸门：规定不受影响', unrelatedText.includes('插件规定'))
 emit('session/event', sRel, { type: 'turn/end' })
+
+// 5.8 低线索轮：一句话里挑不出关键词（「继续」「这个是对的」）时不能把偏好全挡掉
+const sMeta = { id: 'sMeta' }
+emit('session/event', sMeta, { type: 'turn/start' })
+const meta = await step([{ role: 'user', content: [{ type: 'text', text: '这个是对的，继续' }] }], { agent: { session: sMeta } })
+const metaText = meta.messages.at(-1).content[0].text
+check('低线索轮：按权重保底带入，不把画像全挡掉', metaText.includes('保底带入') || !metaText.includes('未带入'))
+check('低线索轮：保底段里的条目有权重标记', !metaText.includes('保底带入') || /- \[[^\]]*?[0-9]+(?:\.[0-9]+)?·/.test(metaText))
+emit('session/event', sMeta, { type: 'turn/end' })
 
 // 6 用户显式喊停
 emit('session/event', session, { type: 'turn/start' })

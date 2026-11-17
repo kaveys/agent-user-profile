@@ -179,7 +179,7 @@ node bin/profile.mjs health --json
 | ② 抽取与归一 | 产出结构化键值 `{dim, key, fact, confidence, scope}`，正文不落盘；同义条目自动合并，被合并的进历史 | `build.dedupe: true` |
 | ③ 冲突与分区 | 同一件事两种说法按 newest/freeze 处理；十条大类归到 `user_profile` / `user_preference` / `user_social_network` 三个分区 | `conflicts.strategy: newest` |
 | ④ 加密 | 备份包上传默认加密（AES-256-GCM），`backup --out --encrypt` 也可加密导出，`profile unseal` 解回 JSON | 上传默认开 |
-| ⑤ 相关性调用 | 注入前只保留和本轮相关的条目，红线永远带入；遮挡条数写在块尾，不自动扩散 | `inject.relevantOnly: true` |
+| ⑤ 相关性调用 | 注入前只保留和本轮相关的条目，红线永远带入；线索太少时按权重保底（`min(12, max(2, 60%))`，单列一段「保底带入」），遮挡条数写在块尾，不自动扩散 | `inject.relevantOnly: true` |
 | ⑥ 增删改 | 只有用户指令才删除；删除前自动留快照，面板「恢复点」可整批还原 | 始终生效 |
 
 两条硬边界写在代码里、不由画像条目决定：

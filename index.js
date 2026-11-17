@@ -353,15 +353,26 @@ function bigrams(text) {
  * 只带入和本轮有关的条目（流程第 5 步「记忆不自动扩散」）。
  * 红线/硬要求永远带入——那是约束，不是参考；其余按字符二元组重叠判定。
  * 判不出来（用户这轮没有文字、或全都不匹配）时宁可全带：漏掉画像比多带几条更糟。
+ * 保底：命中的条目少于 minKeep 时，按权重补足——否则「这个是对的，继续」这类
+ * 不含线索的短句会把所有偏好都挡在外面，画像等于没生效。
  */
+const weightOfLine = (line) => {
+  const m = /- \[[^\]]*?([0-9]+(?:\.[0-9]+)?)·/.exec(line)
+  return m ? Number(m[1]) : 0
+}
+
 function relevantOnly(md, userText) {
   const raw = typeof md === 'string' ? md : ''
   const query = bigrams(userText)
   if (raw.trim().length === 0 || query.size === 0) return { text: raw, dropped: 0 }
 
+  const minKeep = Number(process.env.DSH_PROFILE_MIN_KEEP ?? 12)
   const lines = raw.split('\n')
   const kept = []
+  const spare = []
   let dropped = 0
+  let keptEntries = 0
+  let keptFilterable = 0
   let inRedline = false
   let currentHeader = ''
 
@@ -390,6 +401,7 @@ function relevantOnly(md, userText) {
     if (inRedline) {
       if (currentHeader) { kept.push(currentHeader); currentHeader = '' }
       kept.push(line)
+      keptEntries += 1
       continue
     }
     const grams = bigrams(line)
@@ -400,15 +412,39 @@ function relevantOnly(md, userText) {
     if (hit) {
       if (currentHeader) { kept.push(currentHeader); currentHeader = '' }
       kept.push(line)
+      keptEntries += 1
+      keptFilterable += 1
     } else {
+      spare.push(line)
       dropped += 1
     }
   }
   if (dropped === 0) return { text: raw, dropped: 0 }
 
+  // 保底：本轮线索太少时按权重补足，别让画像在「继续」「对的」这类轮次里彻底失效。
+  // 只对「可筛条目」（非红线段）按比例保底，保证闸门仍然真的在筛。
+  let filled = 0
+  const totalEntries = keptFilterable + spare.length
+  const floor = Math.min(minKeep, Math.max(2, Math.ceil(totalEntries * 0.6)))
+  if (spare.length > 0 && keptFilterable < floor) {
+    const need = Math.min(floor - keptFilterable, spare.length)
+    const top = spare
+      .map((line, index) => ({ line, index, weight: weightOfLine(line) }))
+      .sort((a, b) => b.weight - a.weight || a.index - b.index)
+      .slice(0, need)
+    if (top.length > 0) {
+      kept.push('', '## 保底带入（本轮字面无关，按权重补足）')
+      for (const item of top) kept.push(item.line)
+      keptEntries += top.length
+      filled = top.length
+      dropped -= top.length
+    }
+  }
+  if (dropped === 0) return { text: `${kept.join('\n').trimEnd()}\n`, dropped: 0, filled }
+
   let body = kept.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd()
   body += `\n\n（另有 ${dropped} 条与本次无关的条目未带入；需要时可让我按关键词查。）`
-  return { text: `${body}\n`, dropped }
+  return { text: `${body}\n`, dropped, filled }
 }
 
 /**
