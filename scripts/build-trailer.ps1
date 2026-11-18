@@ -253,6 +253,37 @@ $Scenes = @(
     }
   },
   @{
+    Name = '05b-tidy'
+    Narration = '记得多了，它自己还会整理：同一件事记了两遍的，自动合成一条。你换一个 AI 工具，也能把「它记得的你」整段搬过来。'
+    Subtitle  = '重复的自动合并 · 换工具也能带走'
+    Draw = {
+      param($g)
+      Txt $g '它会自己整理' 80 62 52 $C.text $true 420
+      Txt $g '记得越多，越要会整理' 440 84 27 $C.dim $false 780
+
+      RoundRect $g 80 150 540 320 22 $C.card $C.line 2
+      Txt $g '同一件事记了两遍' 108 168 26 $C.dim $false 440
+      RoundRect $g 108 212 484 60 12 $C.card2
+      Txt $g '喜欢简洁的回答' 128 226 26 $C.text $false 440
+      RoundRect $g 108 284 484 60 12 $C.card2
+      Txt $g '不喜欢啰嗦的说法' 128 298 26 $C.text $false 440
+      Txt $g '↓ 自动合并' 120 352 22 $C.ok $true 260
+      RoundRect $g 108 392 484 60 12 $C.card2 $C.ok 2
+      Txt $g '喜欢简洁，不要啰嗦' 128 406 26 $C.ok $true 440
+
+      RoundRect $g 660 150 540 320 22 $C.card $C.line 2
+      Txt $g '换个 AI 也能带走' 688 168 26 $C.dim $false 440
+      Txt $g '问它一句：你记得我什么' 688 214 25 $C.text $false 480
+      Txt $g '把回答整段贴进来' 688 254 25 $C.text $false 480
+      Txt $g '逐条拆开 · 自动归类 · 自动定轻重' 688 294 22 $C.faint $false 490
+      $chipTidy = [Drawing.Color]::FromArgb(46, $C.ok)
+      RoundRect $g 688 348 320 56 14 $chipTidy
+      Txt $g '已经搬过来 12 条' 712 362 24 $C.ok $true 300
+
+      TxtCenter $g '哪一条不该记，划掉就行；删错了还能还原' 500 26 $C.dim
+    }
+  },
+  @{
     Name = '06-payoff'
     Narration = '于是新对话的第一句，它就已经懂你了。万一这次不想让它参考，说一句「这次别用我的资料」，它立刻停。'
     Subtitle  = '同一句话，它直接给到你要的样子'

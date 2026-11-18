@@ -7,7 +7,7 @@ This plugin writes those things down, keeps them in one clear list, and puts tha
 
 If you don't want it for a turn, say "don't use my profile this time" — it steps aside and tells you so.
 
-**[77-second intro (Chinese narration)](docs/video/agent-user-profile.mp4)** · [中文 README](README.md)
+**[89-second intro (Chinese narration)](docs/video/agent-user-profile.mp4)** · [中文 README](README.md)
 
 ![Overview](docs/screenshots/01-overview.png)
 

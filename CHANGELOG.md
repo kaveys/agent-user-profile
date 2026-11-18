@@ -5,6 +5,12 @@ The portrait schema version is tracked separately and lives in `config.json`.
 
 ## Unreleased
 
+### v26.1 — intro video refreshed (88.9s, one new scene)
+
+#### Changed
+- Trailer gains a scene「它会自己整理」: duplicates that mean the same thing merge into one entry, and a portrait can be imported wholesale from another AI tool (`ingest`). Eight scenes, 88.9 s, same Kokoro voice; `agent-user-profile.srt` and `-narration.txt` regenerated, README duration updated 77 → 89 s.
+- `scripts/build-trailer.ps1`: the new scene's inline subtitle no longer repeats the caption band verbatim (it now reads「记得越多，越要会整理」).
+
 ### v19 — host compatibility layer (capability probe + degradation + doctor)
 
 Plugin version bumped to **0.3.0**. package.json gains dsh.compat = { hosts: ">=0.2.0", strategy: "capability-probe" }.
