@@ -81,6 +81,10 @@ A standard MCP server — any MCP client can read the same profile.
 
 **What if I want an entry to stop counting, without losing it?** Use **retire** (`profile retire`). The entry leaves the portrait and the prompt, but the record, its weight and its provenance stay in `declarations.jsonl`, so `profile unretire` restores it in one command. Retire means "not in play"; delete means "gone". Retired entries can be restored in bulk from the Data tab.
 
+**Does any of it expire?** Two ways. Temporary state can carry its own shelf life — `profile declare --ttl 7d` (or `--expires 2026-12-31`) — and drops out of the portrait when it lapses, while the record stays on disk. Preferences have no hard deadline, but anything nobody mentions for months fades: it stops being injected automatically, the entry is still there, and the Data tab shows how many faded. Pinned entries never fade.
+
+**Can a throwaway remark overwrite something I stated outright?** No. When two records describe the same thing, confidence decides first: a 1.0 instruction you gave will not be replaced by a 0.6 model guess — the guess is parked as *needs review* instead. If you do want newest-wins, `profile set conflicts.strategy newest` brings the old rule back.
+
 **How big is it?** Tens of KB. No images, no chat logs.
 
 **Do I need DeepSeek Harness?** No. The data layer is a standalone CLI, and the MCP server runs on its own.

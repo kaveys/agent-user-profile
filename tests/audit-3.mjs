@@ -140,7 +140,7 @@ cli('init')
   const corruptBackups = readdirSync(HOME).filter((n) => n.includes('.corrupt-'))
   check('config.json 损坏后仍能工作（按默认重建）', statusBroken.code === 0 && /注意/.test(statusBroken.out), statusBroken.out.split('\n').find((l) => l.includes('注意')) ?? 'no warn')
   check('损坏的配置被备份成 .corrupt-*', corruptBackups.length > 0, corruptBackups.join(','))
-  check('重建后的配置是合法的 schemaVersion 6', readJson('config.json').schemaVersion === 6)
+  check('重建后的配置是合法的 schemaVersion 7', readJson('config.json').schemaVersion === 7)
 
   // 并发写
   const before = readLines('declarations.jsonl').length

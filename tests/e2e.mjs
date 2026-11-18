@@ -55,7 +55,7 @@ t('init 建出配置与目录', () => {
   for (const f of ['config.json', 'declarations.jsonl', 'pending.jsonl', 'changelog.jsonl']) {
     ok(existsSync(join(box, f)), `缺少 ${f}`)
   }
-  eq(JSON.parse(readFileSync(join(box, 'config.json'), 'utf8')).schemaVersion, 6, 'schemaVersion')
+  eq(JSON.parse(readFileSync(join(box, 'config.json'), 'utf8')).schemaVersion, 7, 'schemaVersion')
 })
 
 t('declare 写入一条声明并自带重建', () => {

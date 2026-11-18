@@ -179,7 +179,7 @@ function classifyLegacy(record) {
 }
 
 const DEFAULT_CONFIG = {
-  schemaVersion: 6,
+  schemaVersion: 7,
   // 默认叠加开关：true = 每次任务前注入画像
   enabled: true,
   inject: {
@@ -253,7 +253,20 @@ const DEFAULT_CONFIG = {
   },
   conflicts: {
     // 'newest' = 新值覆盖旧值（旧值进 history）；'freeze' = 两条并留，标未决，等用户 review
-    strategy: 'newest',
+    // 'wise'（v35，默认）= 先比置信度：高置信度新值覆盖低置信度旧值；低置信度新值不敢压高置信度旧值，
+    //   只进待审队列。用户随口一句（0.6）不该抹掉他明确要求过的红线（1.0）。
+    strategy: 'wise',
+    // 置信度差多少才算「一方更可信」；差值小于它视为同档，按时间取新
+    confidenceGap: 0.1,
+  },
+  decay: {
+    // v35 时间衰减：长期没人再提起的偏好会自己变淡，而不是永远占着注入预算。
+    // 只影响排序与是否注入，不改用户填的值；原始 confidence 仍可在 show --json 里看到。
+    enabled: true,
+    afterDays: 90,
+    step: 0.2,
+    // 衰减到这条线以下就不再自动带入（条目仍留在画像里，面板标「已淡化」）
+    floor: 0.35,
   },
   scope: {
     // 项目作用域标识；留空则取当前工作目录名
@@ -605,6 +618,13 @@ function migrateConfig(file, raw, merged) {
       copyFileSync(file, `${file}.bak-v${version}-${Date.now()}`)
     }
     ensureDirs()
+    if (version < 7) {
+      // v35：旧的默认 newest 会让「随口一句」盖掉「明确要求过的事」。
+      // 升级后默认按置信度裁决（wise）；想退回老行为：profile set conflicts.strategy newest
+      if (raw?.conflicts === undefined || raw.conflicts.strategy === 'newest') {
+        merged.conflicts = { ...(merged.conflicts ?? {}), strategy: 'wise' }
+      }
+    }
     writeJson(file, merged)
   } catch {
     // 迁移是加分项，读不到旧配置也不该让命令失败
@@ -806,6 +826,54 @@ function cmdInit({ flags }) {
   process.stdout.write(`已初始化：${HOME}\n`)
 }
 
+/** --expires 2026-12-31 / --ttl 30d → ISO 时间；都没给返回 undefined */
+function parseExpires(flags) {
+  const date = typeof flags.expires === 'string' ? flags.expires.trim() : ''
+  if (date.length > 0) {
+    const at = Date.parse(date)
+    if (Number.isNaN(at)) die(`--expires 看不懂：${date}（写成 2026-12-31 这样的日期）`)
+    return new Date(at).toISOString()
+  }
+  const ttl = typeof flags.ttl === 'string' ? flags.ttl.trim() : ''
+  if (ttl.length > 0) {
+    const m = /^(\d+(?:\.\d+)?)\s*(?:d|day|days|天)?$/i.exec(ttl)
+    if (m === null) die(`--ttl 看不懂：${ttl}（写成 30d 或 30）`)
+    return new Date(Date.now() + Number(m[1]) * 86400000).toISOString()
+  }
+  return undefined
+}
+
+/** 到期时间已过：不进画像，但记录仍留着（可查、可改到期时间、可 prune 清理）。 */
+function isExpired(record, nowMs = Date.now()) {
+  if (typeof record?.expiresAt !== 'string') return false
+  const at = Date.parse(record.expiresAt)
+  return !Number.isNaN(at) && at <= nowMs
+}
+
+/**
+ * 时间衰减（v35）：一条偏好久到没人再提起，就该自己变淡，而不是永远占着注入预算。
+ * 只降「参与排序与注入的权重」，不改用户填的值 —— 面板与 show 里能看到 0.9 → 0.7。
+ */
+function decayOf(item, config, nowMs = Date.now()) {
+  const decay = config?.decay
+  if (decay?.enabled === false) return null
+  const afterDays = Number(decay?.afterDays) > 0 ? Number(decay.afterDays) : 90
+  const step = Number.isFinite(Number(decay?.step)) ? Number(decay.step) : 0.2
+  const floor = Number.isFinite(Number(decay?.floor)) ? Number(decay.floor) : 0.35
+  const last = Date.parse(item?.lastSeen ?? item?.firstSeen ?? '')
+  if (Number.isNaN(last)) return null
+  const steps = Math.floor((nowMs - last) / 86400000 / afterDays)
+  if (steps <= 0) return null
+  const base = Number(item?.weight ?? 0)
+  const value = Math.max(floor, Number((base - step * steps).toFixed(2)))
+  return {
+    steps,
+    from: base,
+    value,
+    stale: value <= floor && item.core !== true && item.pinned !== true,
+  }
+}
+
 function cmdDeclare({ flags }) {
   const dim = typeof flags.dim === 'string' ? flags.dim : 'taste'
   const rawFact = typeof flags.fact === 'string' ? flags.fact.trim() : ''
@@ -845,6 +913,9 @@ function cmdDeclare({ flags }) {
     core: flags.core === true,
     scope: scopeKind,
     scopeId: scopeKind === 'global' ? undefined : activeScope(flags, config).id,
+    // v35 时效：临时状态（「这周在赶答辩」「最近在补高数」）可以带到期时间，
+    // 过期后自动退出画像，不需要用户回来手动删。
+    expiresAt: parseExpires(flags),
     session: typeof flags.session === 'string' ? flags.session : undefined,
     // 溯源（v15）：记下「从哪句话、哪一轮来的」。将来出问题能翻回原话，
     // 而不是只能整条删掉。excerpt 由调用方给（host 插件传当轮用户首句）。
@@ -1307,13 +1378,19 @@ function buildDimensions(declarations, observed, config) {
     // 软失效（retire）：记录本身留在 declarations.jsonl 里（随时能恢复、也不丢溯源），
     // 但不再进画像、不再参与冲突裁决 —— 「不想要了」和「从没记过」是两件事。
     if (record.retiredAt) continue
+    // 到期（v35）：临时状态过了保质期就不再进画像。记录仍在，能查能改能 prune。
+    if (isExpired(record)) continue
     const dim = typeof record.dim === 'string' ? record.dim : 'taste'
     const key = `${dim}::${record.key ?? dim}`
     const list = byKey.get(key) ?? []
     list.push(record)
     byKey.set(key, list)
   }
-  const strategy = config.conflicts?.strategy === 'freeze' ? 'freeze' : 'newest'
+  const strategyRaw = config.conflicts?.strategy
+  const strategy = strategyRaw === 'freeze' || strategyRaw === 'wise' ? strategyRaw : 'newest'
+  const gap = Number.isFinite(Number(config.conflicts?.confidenceGap))
+    ? Number(config.conflicts.confidenceGap)
+    : 0.1
   const conflicts = []
   for (const [key, list] of byKey) {
     list.sort((a, b) => String(a.at).localeCompare(String(b.at)))
@@ -1346,28 +1423,45 @@ function buildDimensions(declarations, observed, config) {
     // 置顶就静默消失，而面板上看起来什么都没发生。
     const anyPinnedAt = [...list].reverse().find((r) => r.pinnedAt !== undefined)?.pinnedAt
     const anyCore = list.some((r) => r.core === true)
-    target.items.push(shape(latest, {
+    const shapeChosen = (record) => shape(record, {
       firstSeen: list[0].at,
-      lastSeen: latest.at,
+      lastSeen: record.at,
       evidence: list.map((r) => r.id).filter(Boolean),
       core: anyCore,
       pinned: anyPinnedAt === undefined ? undefined : true,
       pinnedAt: anyPinnedAt,
-    }))
+    })
 
+    // 先裁决冲突，再决定这一条用哪个值 —— 顺序反了就会出现「先写进画像、再被 history 顶掉」的悬空条目。
     const previous = list[list.length - 2]
+    const conflictBase = {
+      dim,
+      key: latest.key ?? dim,
+      from: { id: previous?.id, text: previous?.fact, at: previous?.at },
+      to: { id: latest.id, text: latest.fact, at: latest.at },
+    }
+    let chosen = latest
     if (previous !== undefined && previous.fact !== latest.fact) {
       if (strategy === 'freeze') {
-        // 冻结：两条都留在 items，标 frozen；注入时并排展示，等用户裁决
-        target.items[target.items.length - 1].frozen = true
-        target.items.push(shape(previous, { frozen: true }))
+        // 冻结：两条并留，标 frozen；注入时并排展示，等用户裁决
+        target.items.push(shape(previous, { frozen: true }), shape(latest, { frozen: true }))
         conflicts.push({
-          dim,
-          key: latest.key ?? dim,
+          ...conflictBase,
           status: 'frozen',
           rule: 'conflicts.strategy=freeze：两条并留、不选边，等 profile review 裁决',
-          from: { id: previous.id, text: previous.fact, at: previous.at },
-          to: { id: latest.id, text: latest.fact, at: latest.at },
+        })
+        continue
+      }
+      const oldConf = Number(previous.confidence ?? (previous.source === 'model' ? 0.6 : 1))
+      const newConf = Number(latest.confidence ?? (latest.source === 'model' ? 0.6 : 1))
+      if (strategy === 'wise' && newConf <= oldConf - gap) {
+        // 用户随口一句（模型提炼 0.6）不该盖掉他明确要求过的红线（1.0）：
+        // 继续用旧值，新值挂「待确认」，由 profile review 或手动 edit 裁决。
+        chosen = previous
+        conflicts.push({
+          ...conflictBase,
+          status: 'needs_review',
+          rule: `wise：新值置信度 ${newConf} 比旧值 ${oldConf} 低，暂不覆盖（profile review 裁决，或 profile edit 手动改）`,
         })
       } else {
         target.history.push({
@@ -1380,15 +1474,24 @@ function buildDimensions(declarations, observed, config) {
           supersededBy: latest.id,
         })
         conflicts.push({
-          dim,
-          key: latest.key ?? dim,
+          ...conflictBase,
           status: 'resolved',
-          rule: 'declared 新值覆盖旧值；旧值保留在 history',
-          from: { id: previous.id, text: previous.fact, at: previous.at },
-          to: { id: latest.id, text: latest.fact, at: latest.at },
+          rule: strategy === 'wise'
+            ? `wise：新值置信度 ${newConf} ≥ 旧值 ${oldConf}，采用新值；旧值进 history`
+            : 'declared 新值覆盖旧值；旧值保留在 history',
         })
       }
     }
+
+    const item = shapeChosen(chosen)
+    // 时间衰减：久未再提及的偏好自己变淡（排序降权、低到 floor 以下就不再自动注入）
+    const decay = decayOf(item, config)
+    if (decay !== null) {
+      item.weight = decay.value
+      item.decay = { steps: decay.steps, from: decay.from }
+      if (decay.stale) item.stale = true
+    }
+    target.items.push(item)
   }
 
   // 行为型：只进 habits，权重低，可被声明型压住
@@ -1559,7 +1662,11 @@ function renderInject(profile, config) {
     ? config.inject.personalizeDimensions
     : (prioritize ? DEFAULT_CONFIG.inject.personalizeDimensions : [])
 
-  const all = flatten(profile, config)
+  const allRaw = flatten(profile, config)
+  // 已淡化的条目（长期没再被提起、权重衰减到 floor 以下）不再自动注入 —— 但它们没被删，
+  // show / 面板里照样能查到。宁可少带一条过时的，也别把三个月前的偏好当现在的你。
+  const faded = allRaw.filter((item) => item.stale === true)
+  const all = faded.length > 0 ? allRaw.filter((item) => item.stale !== true) : allRaw
   // 置顶条目单独成段、排最前：它们不受相关性闸门与 topK 影响，属于「每轮都该知道」。
   const pinned = all.filter((item) => item.pinned === true)
   const pool = pinned.length > 0 ? all.filter((item) => item.pinned !== true) : all
@@ -1640,6 +1747,9 @@ function renderInject(profile, config) {
   if (hidden > 0) {
     body.push(`（另有 ${hidden} 条未带入：调大 inject.maxChars，或把 inject.maxChars 设为 0）`)
   }
+  if (faded.length > 0) {
+    body.push(`（另有 ${faded.length} 条长期没再提起、已淡化，未带入；profile show --dim <维度> 仍可查看）`)
+  }
   if (profile.stats.pending > 0) {
     body.push(`（有 ${profile.stats.pending} 条待审候选未进画像）`)
   }
@@ -1694,6 +1804,10 @@ function cmdBuild({ flags }) {
       items: Object.values(dimensions).reduce((n, s) => n + s.items.length, 0),
       // 软失效的条目：不在画像里，但记录还在（面板「数据」页给个数，免得以为凭空少了几条）
       retired: readJsonl(p('declarations.jsonl')).filter((row) => row.retiredAt !== undefined).length,
+      // 已到期（v35）：临时状态过了保质期，记录还在、能查能 prune
+      expired: declarations.filter((row) => isExpired(row)).length,
+      // 已淡化（v35）：长期没再提起、权重衰减到 floor 以下，不再自动注入
+      faded: Object.values(dimensions).reduce((n, s) => n + s.items.filter((item) => item.stale === true).length, 0),
       pinned: Object.values(dimensions).reduce((n, s) => n + s.items.filter((item) => item.pinned === true).length, 0),
     },
     dimensions,
@@ -2027,7 +2141,17 @@ function cmdPanel() {
         distillHint: config.inject.distillHint !== false,
         announceSuppressed: config.inject.announceSuppressed !== false,
       },
-      conflicts: { strategy: config.conflicts.strategy },
+      conflicts: {
+        strategy: config.conflicts.strategy,
+        confidenceGap: Number(config.conflicts?.confidenceGap ?? 0.1),
+      },
+      // v35 生命周期：面板设置页要能改到，不能只存在于 SET_SPEC 里（第五轮排查的 A2 就是在查这个）
+      decay: {
+        enabled: config.decay?.enabled !== false,
+        afterDays: Number(config.decay?.afterDays ?? 90),
+        step: Number(config.decay?.step ?? 0.2),
+        floor: Number(config.decay?.floor ?? 0.35),
+      },
       build: {
         minEvidenceForPortrait: config.build.minEvidenceForPortrait,
         observedTtlDays: config.build.observedTtlDays,
@@ -2233,18 +2357,27 @@ function cmdForget({ flags }) {
   const ids = typeof flags.ids === 'string'
     ? flags.ids.split(',').map((x) => x.trim()).filter((x) => x.length > 0)
     : []
+  // 证据旁路（v35）：按「哪一轮、哪个会话」撤掉它带来的所有结论 ——
+  // 这是「证据 ↔ 记忆点」的另一半：能顺着证据找到条目，也能顺着条目反查证据并把这一支整体撤销。
+  const session = typeof flags.session === 'string' ? flags.session : ''
+  const turn = flags.turn !== undefined && Number.isFinite(Number(flags.turn)) ? Number(flags.turn) : null
+  // 到期清理：临时状态过了保质期，一条命令归档掉
+  const expiredMode = flags.expired === true
 
-  if (!all && id === '' && key === '' && dim === '' && ids.length === 0) {
-    die('用法：forget --id <id> | --ids <id,id,...> | --key <key> | --dim <维度> | --all [--pending]')
+  if (!all && !expiredMode && id === '' && key === '' && dim === '' && ids.length === 0 && session === '' && turn === null) {
+    die('用法：forget --id <id> | --ids <id,id,...> | --key <key> | --dim <维度> | --session <会话> | --turn <轮次> | --expired | --all [--pending]')
   }
 
   const file = inPending ? p('pending.jsonl') : p('declarations.jsonl')
   const records = readJsonl(file)
   const hit = (r) => {
     if (all) return true
+    if (expiredMode) return isExpired(r)
     if (ids.length > 0 && ids.includes(r.id)) return true
     if (id !== '' && r.id === id) return true
     if (key !== '' && r.key === key) return true
+    if (session !== '' && (r.session === session || r.provenance?.session === session)) return true
+    if (turn !== null && (r.provenance?.turn === turn)) return true
     // --dim 只在额外给了 --key 之外的显式意图时才按维度清空，避免手滑清掉一整维
     if (dim !== '' && r.dim === dim) return true
     return false
@@ -2989,7 +3122,12 @@ const SET_SPEC = {
   'inject.relevanceFloor': { type: 'number', min: 0, max: 1, note: '相关性门槛：低于这个比例算与本轮无关（默认 0.12）' },
   'inject.announceSuppressed': { type: 'boolean', note: '喊停时是否在结果里声明' },
   'inject.distillHint': { type: 'boolean', note: '注入块尾部是否附轮末候选提示' },
-  'conflicts.strategy': { type: 'enum', values: ['newest', 'freeze'], note: 'newest=新值覆盖；freeze=谁都不选边' },
+  'conflicts.strategy': { type: 'enum', values: ['newest', 'freeze', 'wise'], note: 'newest=新值覆盖；freeze=谁都不选边；wise=先比置信度（默认）' },
+  'conflicts.confidenceGap': { type: 'number', min: 0, max: 1, note: '置信度差多少才算一方更可信（wise 用，默认 0.1）' },
+  'decay.enabled': { type: 'boolean', note: '长期没再提起的条目是否自动变淡（默认开）' },
+  'decay.afterDays': { type: 'number', min: 1, max: 3650, integer: true, note: '多少天没再提起开始衰减（默认 90）' },
+  'decay.step': { type: 'number', min: 0, max: 1, note: '每过一个周期降多少权重（默认 0.2）' },
+  'decay.floor': { type: 'number', min: 0, max: 1, note: '衰减下限；降到这条线以下就不再自动注入（默认 0.35）' },
   'build.minEvidenceForPortrait': { type: 'number', min: 1, max: 50, integer: true, note: '够几条证据才生成可用画像' },
   'build.observedTtlDays': { type: 'number', min: 1, max: 3650, integer: true, note: '行为信号保质期（天）' },
   'build.declaredWeight': { type: 'number', min: 0, max: 1, note: '声明型条目的基础权重' },

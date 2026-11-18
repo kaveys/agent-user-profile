@@ -576,7 +576,14 @@ const ACTION_ROUTE = '/user-profile/action'
       if (typeof input.key === 'string' && input.key.length > 0) args.push('--key', input.key)
       if (input.core === true) args.push('--core')
       if (input.pending === true) args.push('--pending')
+      // v35 时效：临时状态可以带到期时间（"7d" 或 "2026-12-31"）
+      if (typeof input.ttl === 'string' && input.ttl.length > 0) args.push('--ttl', input.ttl)
+      if (typeof input.expires === 'string' && input.expires.length > 0) args.push('--expires', input.expires)
       return runCli(args)
+    },
+    /** v35 到期清理：把过了保质期的临时状态归档掉（清理前自动留快照）。 */
+    forgetExpired() {
+      return runCli(['forget', '--expired'])
     },
     forget(input) {
       const args = ['forget']

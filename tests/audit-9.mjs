@@ -119,7 +119,7 @@ const injectionFor = async (text) => {
   cfg.build = { ...(cfg.build ?? {}), similarityThreshold: 0.45 }
   writeFileSync(file, JSON.stringify(cfg, null, 2))
   const r = json(['panel'])
-  check('v5 配置被迁移到 v6', readJson('config.json').schemaVersion === 6, String(readJson('config.json').schemaVersion))
+  check('v5 配置被迁移到 v7', readJson('config.json').schemaVersion === 7, String(readJson('config.json').schemaVersion))
   check('旧默认 0.45 被迁到 0.35', readJson('config.json').build.similarityThreshold === 0.35, String(readJson('config.json').build.similarityThreshold))
   check('迁移后面板能正常读', r.data?.ok === true)
 }

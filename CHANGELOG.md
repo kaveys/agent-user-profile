@@ -5,6 +5,22 @@ The portrait schema version is tracked separately and lives in `config.json`.
 
 ## Unreleased
 
+### v35 — a memory that ages: expiry, confidence-first conflicts, decay, revoke by evidence
+
+Four lifecycle rules that every "memory system" paper describes and a flat JSON store usually forgets. All four are switches: turn them off and the old behaviour comes back unchanged.
+
+#### Added
+
+- **Expiry for temporary state** — `profile declare ... --ttl 7d` or `--expires 2026-12-31`. An expired record leaves the portrait but stays in `declarations.jsonl` (you can inspect it, change the date, or archive it). `stats.expired` counts them, `profile forget --expired` archives the lot, and the panel's data tab grew a "已到期" card.
+- **`conflicts.strategy = 'wise'`** (now the default) — when two records share a key, the newer one only wins if it is not clearly less confident. A 0.6 model guess no longer overwrites a 1.0 explicit instruction; instead the pair is recorded as `needs_review` and the old value stays in force. `newest` and `freeze` remain available, and `set conflicts.strategy newest` restores the old behaviour.
+- **Time decay** — `decay.enabled` (default on), `decay.afterDays` 90, `decay.step` 0.2, `decay.floor` 0.35. Items nobody has mentioned for months lose weight; below the floor they stop being injected automatically (`已淡化` in the panel, one line in the inject block explains the count). Pinned and core items never fade.
+- **Revoke by evidence** — `profile forget --session <id>` / `--turn <n>` removes every conclusion that came from that conversation, in one snapshot. This is the other half of provenance: before, you could see where a fact came from but had to delete it one by one.
+- `tests/audit-12.mjs` — 14 checks over the four rules, wired into CI.
+
+#### Changed
+
+- `config.json` schema 6 → 7. Existing configs are backed up (`config.json.bak-v6-*`) and their `conflicts.strategy` is upgraded from `newest` to `wise`; nothing else is touched.
+
 ### v34 — budget cuts now leave a trace, one ring of restore points
 
 Two behaviours promised by the UI finally match the code, plus a documentation claim that was never true.

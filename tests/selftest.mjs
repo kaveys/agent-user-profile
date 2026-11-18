@@ -295,8 +295,8 @@ const legacy = JSON.parse(readFileSync(cfgPath, 'utf8'))
 writeFileSync(cfgPath, JSON.stringify({ ...legacy, schemaVersion: 1, build: undefined, conflicts: undefined, scope: undefined }))
 run('status', '--json')   // 任意命令都会走 loadConfig → 迁移
 const migrated = JSON.parse(readFileSync(cfgPath, 'utf8'))
-check('config 迁移到 schemaVersion 6', migrated.schemaVersion === 6, String(migrated.schemaVersion))
-check('迁移补出 conflicts/scope/autoBuild', migrated.conflicts?.strategy === 'newest' && migrated.scope !== undefined && migrated.build?.autoBuild === true)
+check('config 迁移到 schemaVersion 7', migrated.schemaVersion === 7, String(migrated.schemaVersion))
+check('迁移补出 conflicts/scope/autoBuild', migrated.conflicts?.strategy === 'wise' && migrated.scope !== undefined && migrated.build?.autoBuild === true)
 check('迁移留备份文件', readdirSync(HOME).some((f) => f.startsWith('config.json.bak-v1-')))
 
 // 13 autoBuild：turn/end 后自动重建画像（不依赖人手动跑 CLI）
