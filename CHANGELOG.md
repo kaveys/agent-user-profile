@@ -5,6 +5,15 @@ The portrait schema version is tracked separately and lives in `config.json`.
 
 ## Unreleased
 
+### v29 — a cover card opens the film (85.3s)
+
+#### Added
+- **`00-cover` scene**: 3.0 s title card —「DSH 新插件」chip,「人物画像」at 120 px, a short accent rule, then「让 AI 更懂你是谁」. No narration and no subtitle band, so it reads as a poster; because it is the first frame, the video's thumbnail is now the title instead of a mid-sentence still.
+- `scripts/build-trailer.ps1` learned three small things to support it: a scene can be `Silent = $true` with a fixed `Hold` (a matching-length silent WAV is generated so every segment keeps the same stream layout), `HideBand = $true` skips the subtitle strip, and subtitle cues are numbered by their own counter so the cover does not leave an empty entry in the `.srt`.
+
+#### Changed
+- Nine scenes → **ten**; total **85.3 s**. README / README.en durations updated.
+
 ### v28 — sharper hook, a comparison scene, natural pace (82.2s)
 
 #### Changed

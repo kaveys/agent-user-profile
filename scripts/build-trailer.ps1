@@ -136,6 +136,22 @@ function Draw-Subtitle($g, [string]$s) {
 # ---------------------------------------------------------------- 分镜
 $Scenes = @(
   @{
+    Name = '00-cover'
+    Narration = ''
+    Subtitle  = ''
+    Silent    = $true
+    Hold      = 3.0
+    HideBand  = $true
+    Draw = {
+      param($g)
+      RoundRect $g 506 330 268 56 28 ([Drawing.Color]::FromArgb(40, $C.accent))
+      TxtCenter $g 'DSH 新插件' 345 30 $C.accent $true
+      TxtCenter $g '人物画像' 414 120 $C.text $true
+      RoundRect $g 592 600 96 5 2 $C.accent
+      TxtCenter $g '让 AI 更懂你是谁' 630 46 $C.dim
+    }
+  },
+  @{
     Name = '01-hook'
     Narration = '它读过整个互联网，却记不住你昨天说的一句话。换个对话，你又变回陌生人。'
     Subtitle  = '不是它笨，是它不认识你'
@@ -391,7 +407,7 @@ Write-Host ("配音引擎：" + $engineLine)
 
 # ---------------------------------------------------------------- 逐场渲染
 $segments = @(); $srts = @(); $timeline = @()
-$t = 0.0; $idx = 0
+$t = 0.0; $idx = 0; $cue = 0
 
 foreach ($scene in $Scenes) {
   $idx++
@@ -400,9 +416,19 @@ foreach ($scene in $Scenes) {
   $txt = Join-Path $Work ("{0}.txt" -f $scene.Name)
 
   # 每次都重画：留着旧图会让抽帧检查通过、成片却还是上一版文案
-  $pair = New-Slide { param($g) & $scene.Draw $g; Draw-Subtitle $g $scene.Subtitle }
+  $pair = New-Slide { param($g) & $scene.Draw $g; if (-not $scene.HideBand) { Draw-Subtitle $g $scene.Subtitle } }
   $bmp = $pair[0]; $gfx = $pair[1]
   $gfx.Dispose(); $bmp.Save($png, [Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
+
+  # 封面场：没有旁白，用等长静音占位，保证所有分段的音轨结构一致
+  $silent = [bool]($scene.Silent)
+  if ($silent) {
+    $hold = [double]$scene.Hold
+    $wav = Join-Path $Work ("{0}.silent.wav" -f $scene.Name)
+    if (-not (Test-Path $wav)) {
+      & $Ffmpeg -y -loglevel error -f lavfi -i 'anullsrc=r=24000:cl=mono' -t $hold -c:a pcm_s16le $wav
+    }
+  }
 
   # 配音按「文案+引擎+音色+速度」指纹缓存：改了文案就必然重配，没改就复用
   $sig = '{0}|{1}|{2}|{3}|{4}' -f $scene.Narration, $Engine, $Voice, $Seed, $Tempo
@@ -412,7 +438,7 @@ foreach ($scene in $Scenes) {
   $wav = Join-Path $Work ("{0}.{1}.wav" -f $scene.Name, $sigKey)
   $mp3 = Join-Path $Work ("{0}.{1}.mp3" -f $scene.Name, $sigKey)
 
-  if ($useChat -or $useKokoro -or $useEdge) {
+  if (-not $silent -and ($useChat -or $useKokoro -or $useEdge)) {
     if (-not (Test-Path $wav)) {
       Set-Content $txt $scene.Narration -Encoding UTF8
       if ($useChat) {
@@ -445,8 +471,12 @@ foreach ($scene in $Scenes) {
     $sp.Dispose()
   }
 
-  $dur = [double](& $Ffprobe -v error -show_entries format=duration -of csv=p=0 $wav)
-  $hold = [Math]::Round($dur + 0.55, 2)
+  if ($silent) {
+    $hold = [double]$scene.Hold
+  } else {
+    $dur = [double](& $Ffprobe -v error -show_entries format=duration -of csv=p=0 $wav)
+    $hold = [Math]::Round($dur + 0.55, 2)
+  }
   $fadeOut = [Math]::Max(0, $hold - 0.4)
 
   # 分段每次都重建：图片或配音变了而分段还留着，成片就会是上一版的画面
@@ -458,10 +488,14 @@ foreach ($scene in $Scenes) {
 
   $segments += $mp4
   $timeline += [pscustomobject]@{ Scene = $scene.Name; Start = $t; End = ($t + $hold) }
-  $srts += ("{0}`r`n{1} --> {2}`r`n{3}`r`n" -f $idx,
-    ([TimeSpan]::FromSeconds($t)).ToString('hh\:mm\:ss\,fff'),
-    ([TimeSpan]::FromSeconds($t + $hold - 0.1)).ToString('hh\:mm\:ss\,fff'),
-    $scene.Subtitle)
+  # 封面没有字幕，别让它占一个空字幕条目
+  if ($scene.Subtitle) {
+    $cue++
+    $srts += ("{0}`r`n{1} --> {2}`r`n{3}`r`n" -f $cue,
+      ([TimeSpan]::FromSeconds($t)).ToString('hh\:mm\:ss\,fff'),
+      ([TimeSpan]::FromSeconds($t + $hold - 0.1)).ToString('hh\:mm\:ss\,fff'),
+      $scene.Subtitle)
+  }
   $t += $hold
   Write-Host ("[scene {0}] {1}  {2:N2}s" -f $idx, $scene.Name, $hold)
 }
@@ -495,7 +529,7 @@ New-Item -ItemType Directory -Force -Path (Split-Path $outPath) | Out-Null
 $srtPath = Join-Path $Root 'docs/video/agent-user-profile.srt'
 Set-Content $srtPath ($srts -join "`r`n") -Encoding UTF8
 $narPath = Join-Path $Root 'docs/video/agent-user-profile-narration.txt'
-(($Scenes | ForEach-Object { '[' + $_.Name + '] ' + $_.Narration }) -join "`r`n") | Set-Content $narPath -Encoding UTF8
+(($Scenes | Where-Object { $_.Narration } | ForEach-Object { '[' + $_.Name + '] ' + $_.Narration }) -join "`r`n") | Set-Content $narPath -Encoding UTF8
 
 Write-Host ''
 Write-Host ("总时长：{0:N2} 秒" -f $t)
