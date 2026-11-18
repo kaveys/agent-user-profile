@@ -5,6 +5,16 @@ The portrait schema version is tracked separately and lives in `config.json`.
 
 ## Unreleased
 
+### v33 — shorter narration, 54 s film
+
+Every narrated scene was rewritten to say the same thing in fewer words: 398 characters → **253** (‑37%), one idea per sentence, no clause stacking. The film goes 95.1 s → **53.9 s** without dropping a single scene or touching the visuals.
+
+#### Changed
+- Narration, all ten spoken scenes. Examples: 「你说过，你喜欢简单一点。第二天，它又开始绕圈子。你说那个文件夹别动，它还是动了。每换一个新对话，你就得从头再讲一遍。」(60) → 「你说过喜欢简单点。第二天，它又开始绕。每换个对话，你都得重新交代一遍。」(30); 「那它和别的记忆插件差在哪。别的大多只存聊天记录，用的时候再翻。它把记忆整理成一张清单…」(70) → 「别人存聊天记录，用的时候再翻。它直接给你一张清单，开口前先读。」(28).
+- Subtitles shortened to match (still a separate line from the narration, no duplication).
+- Shorter sentences also fixed the ChatTTS pacing: all ten scenes landed at **4.7–5.3 字/秒 on the first take**, so the take-selection loop from v32 no longer rejects anything.
+- `README.md` / `README.en.md`: 95 秒 → **54 秒** / `54-second`.
+
 ### v32 — the film shows pin and retire (95.1 s)
 
 #### Changed
