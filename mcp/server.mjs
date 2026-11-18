@@ -26,7 +26,7 @@ import { createInterface } from 'node:readline'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CLI = join(HERE, '..', 'bin', 'profile.mjs')
 const HOME = process.env.DSH_USER_PROFILE_HOME || join(homedir(), '.dsh', 'user-profile')
-const SERVER_INFO = { name: 'agent-user-profile', version: '0.5.1' }
+const SERVER_INFO = { name: 'agent-user-profile', version: '0.5.2' }
 const PROTOCOL_FALLBACK = '2024-11-05'
 
 const log = (message) => process.stderr.write(`[user-profile-mcp] ${message}\n`)
@@ -247,6 +247,10 @@ function callTool(name, args = {}) {
     const dim = typeof args.dim === 'string' && args.dim.length > 0 ? args.dim : undefined
     const hits = readDeclarations().filter((record) => {
       if (dim !== undefined && record?.dim !== dim) return false
+      // v37：模型拿 search 的结果会当「现在仍然成立」用。已放下/已过期的条目必须排除，
+      // 否则「先放下」在模型眼里等于没生效（用户以为收起来了，模型照样照着办）。
+      if (record?.retiredAt !== undefined) return false
+      if (typeof record?.expiresAt === 'string' && record.expiresAt.length > 0 && new Date(record.expiresAt).getTime() <= Date.now()) return false
       const haystack = `${record?.fact ?? ''} ${record?.key ?? ''}`.toLowerCase()
       return haystack.includes(needle)
     })

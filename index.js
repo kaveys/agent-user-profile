@@ -15,7 +15,7 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { execFile, execFileSync } from 'node:child_process'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir, tmpdir } from 'node:os'
 
@@ -237,6 +237,27 @@ function cachedText(file) {
   }
   return reader()
 }
+/**
+ * 丢掉「别的项目」的条目（v37）。
+ * 注入块里项目条目长这样：- [已确认 1 · project:proj-A] 这个仓库用 pnpm 管依赖
+ * 只保留当前项目的与全局的（没有 project: 标记的即全局/无作用域）。
+ * inject.md 仍用 build --all-scopes 生成（面板要看全部），过滤发生在注入这一步。
+ */
+export function filterForeignScope(md, currentScopeId) {
+  const lines = String(md).split('\n')
+  const kept = []
+  let dropped = 0
+  for (const line of lines) {
+    const marker = /·\s*project:([^\]\s]+)/.exec(line)
+    if (marker !== null && marker[1] !== currentScopeId) {
+      dropped += 1
+      continue
+    }
+    kept.push(line)
+  }
+  return { text: dropped === 0 ? md : kept.join('\n'), dropped }
+}
+
 const readInjectMd = () => cachedText(p('inject.md'))
 const readPortraitMd = () => cachedText(p('profile.md'))
 const readConfig = () => cachedJson(p('config.json'), parseConfig)
@@ -587,7 +608,11 @@ const ACTION_ROUTE = '/user-profile/action'
     },
     forget(input) {
       const args = ['forget']
+      const ids = Array.isArray(input.ids) ? input.ids.join(',') : input.ids
       if (input.all === true) args.push('--all')
+      // v37：面板「批量删除」发的是 ids，原来只有 id/key/dim 分支 → 每次都报「缺少 id」，
+      // 而前端又把失败当成成功提示，用户看到「已删除 N 条」但什么都没发生。
+      else if (typeof ids === 'string' && ids.length > 0) args.push('--ids', ids)
       else if (typeof input.id === 'string' && input.id.length > 0) args.push('--id', input.id)
       else if (typeof input.key === 'string' && input.key.length > 0) args.push('--key', input.key)
       else if (typeof input.dim === 'string' && input.dim.length > 0) args.push('--dim', input.dim)
@@ -643,8 +668,11 @@ const ACTION_ROUTE = '/user-profile/action'
       return runCli(args)
     },
     edit(input) {
-      if (typeof input.id !== 'string' || input.id.length === 0) return { ok: false, error: '缺少 id' }
-      const args = ['edit', '--id', input.id]
+      const ids = Array.isArray(input.ids) ? input.ids.join(',') : input.ids
+      const hasIds = typeof ids === 'string' && ids.length > 0
+      if (!hasIds && (typeof input.id !== 'string' || input.id.length === 0)) return { ok: false, error: '缺少 id / ids' }
+      // v37：批量「设为核心」走 --ids（只改状态）。CLI 侧早就支持，宿主没透传。
+      const args = ['edit', hasIds ? '--ids' : '--id', hasIds ? ids : input.id]
       if (typeof input.fact === 'string' && input.fact.trim().length > 0) args.push('--fact', input.fact.trim())
       if (typeof input.dim === 'string' && input.dim.length > 0) args.push('--dim', input.dim)
       if (typeof input.key === 'string' && input.key.length > 0) args.push('--key', input.key)
@@ -1541,6 +1569,23 @@ const ACTION_ROUTE = '/user-profile/action'
           // 规定与数据分开：规定永远进，数据有多少带多少（没有就只带规定）。
           let usable = injectable(portrait, md) ? md : ''
           // 相关性检索（流程第 5 步）：只把和本轮有关的条目带进来，记忆不自动扩散。
+          // v37：先按当前项目过滤，再做相关性闸门。
+          // 面板需要"全部项目"的总览，所以产物仍用 --all-scopes 生成；
+          // 但注入给模型的文本不能把别的项目的细节带上。
+          if (usable) {
+            const curScope = (typeof cfg.scope?.id === 'string' && cfg.scope.id.length > 0)
+              ? cfg.scope.id
+              : basename(process.cwd())
+            // 过滤是"锦上添花"，它出错绝不能让整轮注入消失（v37 第一版就是这么翻车的：
+            // basename 忘了导入，抛错被外层 catch 吞掉，画像静默不注入）。
+            try {
+              const filtered = filterForeignScope(usable, curScope)
+              if (filtered.dropped > 0) log('scope filter dropped', filtered.dropped, 'items', 'scope=' + curScope)
+              usable = filtered.text
+            } catch (error) {
+              log('scope filter failed, injecting unfiltered', error?.message)
+            }
+          }
           if (usable && cfg.inject?.relevantOnly !== false) {
             const gated = relevantOnly(usable, userText)
             if (gated.dropped > 0) log('relevance gate dropped', gated.dropped, 'items')

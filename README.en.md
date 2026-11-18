@@ -49,6 +49,8 @@ git clone https://github.com/kaveys/agent-user-profile.git
 cd agent-user-profile
 node bin/profile.mjs init
 node bin/profile.mjs declare --dim taste --fact "用户偏爱克制的深色界面" --confidence 0.9
+node bin/profile.mjs declare --dim constraints --fact "scrub everything before publishing" --core
+node bin/profile.mjs declare --dim communication --fact "conclusion first, evidence second"
 node bin/profile.mjs build && node bin/profile.mjs show
 ```
 
@@ -77,13 +79,13 @@ A standard MCP server — any MCP client can read the same profile.
 
 **Can I undo a deletion?** Yes — a snapshot is taken before every destructive action (last 20 kept), restorable from the panel.
 
-**What if there is something it should know every single time?** **Pin** that entry. Pinned entries sit at the top of the injected block and skip the relevance filter — they are carried even into a turn about an unrelated compiler error. Pin from the row in the panel, or `profile pin --key <key>`.
+**What if there is something it should know every single time?** **Pin** that entry. Pinned entries sit at the top of the injected block and skip the relevance filter — they are carried even into a turn about an unrelated compiler error. Pin from the row in the panel, or `node bin/profile.mjs pin --key <key>`.
 
-**What if I want an entry to stop counting, without losing it?** Use **retire** (`profile retire`). The entry leaves the portrait and the prompt, but the record, its weight and its provenance stay in `declarations.jsonl`, so `profile unretire` restores it in one command. Retire means "not in play"; delete means "gone". Retired entries can be restored in bulk from the Data tab.
+**What if I want an entry to stop counting, without losing it?** Use **retire** (`node bin/profile.mjs retire`). The entry leaves the portrait and the prompt, but the record, its weight and its provenance stay in `declarations.jsonl`, so `profile unretire` restores it in one command. Retire means "not in play"; delete means "gone". Retired entries can be restored in bulk from the Data tab.
 
-**Does any of it expire?** Two ways. Temporary state can carry its own shelf life — `profile declare --ttl 7d` (or `--expires 2026-12-31`) — and drops out of the portrait when it lapses, while the record stays on disk. Preferences have no hard deadline, but anything nobody mentions for months fades: it stops being injected automatically, the entry is still there, and the Data tab shows how many faded. Pinned entries never fade.
+**Does any of it expire?** Two ways. Temporary state can carry its own shelf life — `node bin/profile.mjs declare --ttl 7d` (or `--expires 2026-12-31`) — and drops out of the portrait when it lapses, while the record stays on disk. Preferences have no hard deadline, but anything nobody mentions for months fades: it stops being injected automatically, the entry is still there, and the Data tab shows how many faded. Pinned entries never fade.
 
-**Can a throwaway remark overwrite something I stated outright?** No. When two records describe the same thing, confidence decides first: a 1.0 instruction you gave will not be replaced by a 0.6 model guess — the guess is parked as *needs review* instead. If you do want newest-wins, `profile set conflicts.strategy newest` brings the old rule back.
+**Can a throwaway remark overwrite something I stated outright?** No. When two records describe the same thing, confidence decides first: a 1.0 instruction you gave will not be replaced by a 0.6 model guess — the guess is parked as *needs review* instead. If you do want newest-wins, `node bin/profile.mjs set conflicts.strategy newest` brings the old rule back.
 
 **How big is it?** Tens of KB. No images, no chat logs.
 

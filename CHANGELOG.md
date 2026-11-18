@@ -5,6 +5,36 @@ The portrait schema version is tracked separately and lives in `config.json`.
 
 ## Unreleased
 
+### v37 — data survives dedupe/import/merge, docs match reality
+
+Three sub-agents reviewed this plugin cold, without any of the authoring context: one followed the README as a first-time user, one audited data consistency and field propagation, one audited the privacy contract. Their reports overlapped on nothing, which is how the list below got this long. Every item was reproduced by hand before being fixed — a report is a claim, not a fact.
+
+#### Fixed
+
+- **`dedupe --apply` deleted retired records** — the merge path filtered to "live" rows and then wrote that filtered array back as the whole file, so every "先放下" record vanished from disk. It now merges into a copy of the full table.
+- **Import dropped state** — `profile import` rebuilt each record from a short field list, losing `pinnedAt`, `expiresAt`, `scope`, `scopeId`, `retiredAt` and the session. Round-tripping a backup silently downgraded every project entry to global and cancelled every expiry date.
+- **Synonym merge swallowed scope** — when a global declaration merged into a project twin, the result inherited the narrower scope, so the fact disappeared from every other project.
+- **`merge` threw away the better confidence and the later expiry**, and wrote no snapshot first.
+- **Panel bulk actions always failed and always reported success** — the panel sent `ids`, the host actions only handled single `id`, and the panel printed "已完成" whatever came back. Host now forwards `ids`, and the panel shows the real error.
+- **`--excerpt` bypassed the privacy gate** — `provenance.excerpt` was `slice(0, 80)` of the raw sentence, so a password or ID number typed in passing landed on disk verbatim. Excerpts now go through the same `blockedPrivacy` + redaction path as the fact itself.
+- **`redact` never scanned `excerpt`** — it reported "0 处" while an ID number sat in `provenance.excerpt`, and its write-back copied the plaintext into a new `redactedFrom` field. It now scrubs excerpts too and no longer echoes the original.
+- **`sk-` keys with hyphens escaped redaction** — `sk-[A-Za-z0-9]{16,}` could not match `sk-test-1234567890abcdefgh`; the pattern now allows `-`.
+- **Injection leaked other projects' entries** — `inject.md` is built with `--all-scopes` (the panel needs the whole picture), which meant proj-A's project notes rode into proj-B's prompt every turn. The host now drops entries tagged `project:<other>` before the relevance gate.
+- **MCP `profile_search` returned retired and expired entries.**
+- **`rebuildQuietly` swallowed build failures** — stdout still said "画像已刷新" while the snapshot stayed stale; failures now set exit code 3.
+
+#### Changed
+
+- `profile help` lists all 30 commands with a one-line summary, and `<command> --help` prints usage.
+- `profile show --with-keys` prints `key=` and `id=` for live entries, which is what you need before `pin --key` / `retire --id`.
+- `--confidence` out of range is now an error instead of a silent clamp.
+- README command lines use `node bin/profile.mjs <cmd>` (the `profile` shim is not on PATH), the quickstart says three entries are the minimum before anything is injected, the tab is called what the UI calls it, and there is a "update to a new version" section (`robocopy /MIR`, never `cp -r`, which nests the folder).
+- `SECURITY.md` command examples use the same absolute form.
+
+#### Tests
+
+- `tests/audit-14.mjs` — 21 assertions covering all of the above, including a stdio MCP call and a direct import of the host's scope filter.
+
 ### v36 — state survives merging, decay and revoke
 
 Six defects found by re-reading v35 with two independent passes (diff review, then CLI and MCP probes). Every one of them exited 0 and looked fine on the panel; what they broke was the state you had already set.

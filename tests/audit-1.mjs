@@ -125,9 +125,14 @@ const cfgOf = (home) => readJson(home, 'config.json')
   const e = run(home, ['declare', '--dim', 'taste', '--fact', '   ', '--confidence', '0.9'])
   const n = readJsonl(home, 'declarations.jsonl').length
   ok('空事实被拒', e.code !== 0 && n === 0, `code=${e.code} 写入 ${n} 条`)
-  run(home, ['declare', '--dim', 'taste', '--fact', '用户喜欢暗色', '--confidence', '5'])
+  // v37 起越界置信度直接报错，不再静默夹到 1（静默改数据比报错更糟）。
+  const over = run(home, ['declare', '--dim', 'taste', '--fact', '用户喜欢暗色', '--confidence', '5'])
+  const overCount = readJsonl(home, 'declarations.jsonl').length
+  ok('越界权重被拒（不再静默夹到 1）', over.code !== 0 && overCount === 0,
+    `code=${over.code} 写入 ${overCount} 条 stderr=${String(over.stderr ?? '').slice(0, 60)}`)
+  run(home, ['declare', '--dim', 'taste', '--fact', '用户喜欢暗色', '--confidence', '0.6'])
   const w = Number(readJsonl(home, 'declarations.jsonl')[0]?.confidence)
-  ok('越界权重被夹到 0..1', w > 0 && w <= 1, `confidence=${w}`)
+  ok('合法权重原样写入', Math.abs(w - 0.6) < 1e-9, `confidence=${w}`)
 }
 
 // ---------------------------------------------------------------- 8. 未 init 的目录

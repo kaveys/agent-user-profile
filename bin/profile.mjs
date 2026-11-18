@@ -682,7 +682,7 @@ const REDACTION_PRESETS = {
   idcard: { label: '证件号', pattern: '(?<!\\d)\\d{17}[\\dXx](?!\\d)', replace: '⟨证件号⟩' },
   secret: {
     label: '密钥',
-    pattern: '(sk-[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,})',
+    pattern: '(sk-[A-Za-z0-9][A-Za-z0-9-]{15,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,})',
     replace: '⟨密钥⟩',
   },
 }
@@ -699,6 +699,28 @@ const BLOCK_PATTERNS = [
 ]
 
 /** 返回命中的高风险隐私类别（空数组=可以入库）。 */
+/** v37：excerpt 与 fact 用同一套隐私闸门 + 脱敏，超长截断。 */
+function safeExcerpt(raw, config) {
+  if (typeof raw !== 'string') return undefined
+  const text = raw.replace(/\s+/g, ' ').trim()
+  if (text.length === 0) return undefined
+  // 先脱敏再判：手机号/邮箱/证件号能被打码，摘录留着有用；
+  // 打码后仍是高危（密码、住址这类）才整条丢弃。
+  const cleaned = redactWithCount(text.slice(0, 80), config)
+  if (cleaned.text.length === 0) return undefined
+  if (blockedPrivacy(cleaned.text).length > 0) return undefined
+  return cleaned.text
+}
+
+/** v37：两条记录合并时，保质期取更晚的那个（都没设则 undefined）。 */
+function laterExpiry(a, b) {
+  const left = typeof a === 'string' ? a : ''
+  const right = typeof b === 'string' ? b : ''
+  if (left.length === 0) return right.length === 0 ? undefined : right
+  if (right.length === 0) return left
+  return new Date(left).getTime() >= new Date(right).getTime() ? left : right
+}
+
 function blockedPrivacy(text) {
   if (typeof text !== 'string' || !text) return []
   const hits = []
@@ -891,6 +913,11 @@ function cmdDeclare({ flags }) {
     die(`未知维度 ${dim}；可用：${config.dimensions.join(', ')}`)
   }
   const source = flags.source === 'model' ? 'model' : 'user'
+  // v37：越界不再静默夹成 0/1 —— 用户以为设了 2，实际是 1，后面所有裁决都跟着错。
+  if (flags.confidence !== undefined && Number.isFinite(Number(flags.confidence))) {
+    const given = Number(flags.confidence)
+    if (given < 0 || given > 1) die(`--confidence 应在 0 与 1 之间（收到 ${flags.confidence}）`)
+  }
   const confidence = Number.isFinite(Number(flags.confidence)) ? Number(flags.confidence) : (source === 'user' ? 1 : 0.6)
   const scopeKind = typeof flags.scope === 'string' && flags.scope.length > 0 ? flags.scope : 'global'
   // 高风险隐私一律拦截（流程第 1 步）：证件号 / 银行卡 / 密码 / 精确住址不打码入库，
@@ -927,7 +954,9 @@ function cmdDeclare({ flags }) {
       at: nowIso(),
       session: typeof flags.session === 'string' ? flags.session : undefined,
       turn: Number.isFinite(Number(flags.turn)) ? Number(flags.turn) : undefined,
-      excerpt: typeof flags.excerpt === 'string' ? flags.excerpt.slice(0, 80) : undefined,
+      // v37：excerpt 同样是"要被落盘的正文"，必须与 fact 过同一套闸门。
+      // 早前只截 80 字原样写盘，密码/证件号可以从这里绕进库。
+      excerpt: safeExcerpt(flags.excerpt, config),
     },
   }
   assertValid(record, config, flags)
@@ -1007,7 +1036,11 @@ function cmdDeclare({ flags }) {
         // 新声明这一侧也可能是置顶进来的：状态取并集，别让合并把置顶吃掉。
         pinnedAt: twin.pinnedAt ?? record.pinnedAt,
         // 合并时保质期取「更晚到期的那个」：新说的这句若带了 --ttl，不能因为并进老条目就丢掉
-        expiresAt: record.expiresAt ?? twin.expiresAt,
+        expiresAt: laterExpiry(twin.expiresAt, record.expiresAt),
+        // v37：作用域取「宽者」。原来这条不写，全局偏好并进项目条目后会静默降级成
+        // project:proj-A，在别的项目里彻底看不见 —— 用户完全无从察觉。
+        scope: (twin.scope === 'global' || record.scope === 'global') ? 'global' : (twin.scope ?? record.scope),
+        scopeId: (twin.scope === 'global' || record.scope === 'global') ? undefined : (twin.scopeId ?? record.scopeId),
         at: record.at,
         editedAt: record.at,
         mergedFrom: [...(twin.mergedFrom ?? []), { id: record.id, dim: record.dim, fact: record.fact, at: record.at }],
@@ -1850,6 +1883,7 @@ function cmdBuild({ flags }) {
 }
 
 function cmdShow({ flags }) {
+  // v37：--key/--id 这批选择器原来没法用 —— show 里不显示 key，用户无处可看。
   if (flags.json === true) {
     const profile = readJson(p('profile.json'), undefined)
     if (profile === undefined) die('还没有画像；先运行 build')
@@ -1862,6 +1896,28 @@ function cmdShow({ flags }) {
     return
   }
   if (!existsSync(p('profile.md'))) die('还没有画像；先运行 build')
+  if (flags['with-keys'] === true) {
+    // v37：pin/retire/edit 都要 --id 或 --key，但 show 原来一个都不显示，
+    // 用户只能从面板 JSON 里找 —— 等于这组命令对新用户不可用。
+    // 数据源用 declarations（不是 profile.items）：画像还没到 ready 时 items 是空的。
+    const config = loadConfig()
+    const scope = activeScope(flags, config)
+    const rows = readJsonl(p('declarations.jsonl'))
+      .filter((record) => record.retiredAt === undefined)
+      .filter((record) => !isExpired(record))
+      .filter((record) => inScope(record, scope))
+    if (rows.length === 0) die('还没有条目（先 declare 一条）')
+    const lines = rows.map((record) => {
+      const flagsText = [
+        record.core === true ? '核心' : '',
+        record.pinnedAt !== undefined ? '置顶' : '',
+      ].filter(Boolean).join(' · ')
+      const head = `- [${record.dim} ${Number(record.confidence ?? 0).toFixed(2)}${flagsText.length > 0 ? ' · ' + flagsText : ''}] ${record.fact}`
+      return head + '\n    key=' + (record.key ?? '') + '  id=' + (record.id ?? '')
+    })
+    process.stdout.write(rows.length + ' 条（把 key 或 id 交给 pin / retire / edit）\n\n' + lines.join('\n') + '\n')
+    return
+  }
   process.stdout.write(readFileSync(p('profile.md'), 'utf8'))
 }
 
@@ -2248,8 +2304,12 @@ function cmdPanel() {
 function rebuildQuietly() {
   try {
     cmdBuild({ flags: { 'all-scopes': true } })
+    return true
   } catch (error) {
     process.stderr.write(`画像重建失败：${error?.message ?? error}（数据已改，可手动 build 刷新）\n`)
+    // exit 3 专指"数据写进去了，但画像没刷新"：脚本能感知，交互用户看 stderr。
+    if (!process.exitCode) process.exitCode = 3
+    return false
   }
 }
 
@@ -2610,6 +2670,11 @@ function cmdMerge({ flags }) {
     // 否则「把 A 并进 B」会顺手把 A 上的置顶抹掉 —— 用户看到的是置顶莫名消失。
     pinnedAt: keep.pinnedAt ?? drop.pinnedAt,
     core: keep.core === true || drop.core === true,
+    // v37：用户确认过的强度不该因为"并进哪一边"而变弱。
+    confidence: Math.max(Number(keep.confidence ?? 0), Number(drop.confidence ?? 0)),
+    expiresAt: laterExpiry(keep.expiresAt, drop.expiresAt),
+    scope: (keep.scope === 'global' || drop.scope === 'global') ? 'global' : (keep.scope ?? drop.scope),
+    scopeId: (keep.scope === 'global' || drop.scope === 'global') ? undefined : (keep.scopeId ?? drop.scopeId),
     at: nowIso(),
     editedAt: nowIso(),
     mergedFrom: [...(Array.isArray(keep.mergedFrom) ? keep.mergedFrom : []), { id: drop.id, dim: drop.dim, fact: drop.fact }],
@@ -2618,6 +2683,10 @@ function cmdMerge({ flags }) {
   if (!(keep.retiredAt !== undefined && drop.retiredAt !== undefined)) delete merged.retiredAt
   if (merged.pinnedAt === undefined) delete merged.pinnedAt
   if (merged.core !== true) delete merged.core
+  if (merged.expiresAt === undefined) delete merged.expiresAt
+  if (merged.scopeId === undefined) delete merged.scopeId
+  // v37：合并会删掉一条记录，必须可回滚 —— 面板文案一直在承诺"可整批还原"。
+  snapshotDeclarations('merge')
   writeJsonl(p('declarations.jsonl'), records.filter((r) => r.id !== dropId).map((r) => (r.id === keepId ? merged : r)))
   appendJsonl(p('changelog.jsonl'), {
     at: nowIso(),
@@ -2717,7 +2786,10 @@ function cmdDedupe({ flags }) {
     }
     if (applied === 0) die('--apply-pairs 里没有能匹配上的 id 对（用法：--apply-pairs "keepId|dropId,keepId2|dropId2"）')
     snapshotDeclarations('dedupe')
-    const next = records.map((r) => (merges.has(r.id) ? merges.get(r.id) : r)).filter((r) => r !== null)
+    // v37：写回必须基于"全部行"。records 是过滤掉已放下/已过期的活条目列表，
+    // 直接拿它写盘 = 每次 dedupe --apply 都静默永久删除那些行。
+    const allRows = readJsonl(p('declarations.jsonl'))
+    const next = allRows.map((r) => (merges.has(r.id) ? merges.get(r.id) : r)).filter((r) => r !== null)
     writeJsonl(p('declarations.jsonl'), next)
     appendJsonl(p('changelog.jsonl'), { at: nowIso(), kind: 'dedupe-semantic', pairs: applied, before: records.length, after: next.length })
     rebuildQuietly()
@@ -2783,6 +2855,9 @@ function cmdDedupe({ flags }) {
       // 组里只要有一条被置顶，合并结果就保持置顶：
       // 「把 A 并进 B」不应该顺手把 A 上的置顶抹掉（用户看到的是置顶莫名消失）。
       pinnedAt: group.find((m) => m.pinnedAt !== undefined)?.pinnedAt,
+      expiresAt: group.map((m) => m.expiresAt).filter(Boolean).sort().pop(),
+      scope: group.some((m) => m.scope === 'global') ? 'global' : winner.scope,
+      scopeId: group.some((m) => m.scope === 'global') ? undefined : winner.scopeId,
       at: nowIso(),
       editedAt: nowIso(),
       mergedFrom: [
@@ -2791,10 +2866,13 @@ function cmdDedupe({ flags }) {
       ],
     }
     if (kept.pinnedAt === undefined) delete kept.pinnedAt
+    if (kept.expiresAt === undefined) delete kept.expiresAt
+    if (kept.scopeId === undefined) delete kept.scopeId
     merged.set(winner.id, kept)
     for (const loser of group.slice(1)) merged.set(loser.id, null)
   }
-  const next = records.map((r) => (merged.has(r.id) ? merged.get(r.id) : r)).filter((r) => r !== null)
+  const allRows2 = readJsonl(p('declarations.jsonl'))
+  const next = allRows2.map((r) => (merged.has(r.id) ? merged.get(r.id) : r)).filter((r) => r !== null)
   writeJsonl(p('declarations.jsonl'), next)
   appendJsonl(p('changelog.jsonl'), {
     at: nowIso(),
@@ -2866,7 +2944,14 @@ function cmdImport({ flags }) {
       source,
       confidence,
       core: row?.core === true,
-      scope: 'global',
+      // v37：备份/导出→回灌必须是闭环。原来一律写成 global 且丢掉状态字段，
+      // 结果是"恢复备份"以后置顶消失、保质期作废、项目条目跑到全局。
+      scope: row?.scope === 'project' ? 'project' : 'global',
+      scopeId: row?.scope === 'project' && typeof row.scopeId === 'string' ? row.scopeId : undefined,
+      pinnedAt: typeof row?.pinnedAt === 'string' ? row.pinnedAt : undefined,
+      expiresAt: typeof row?.expiresAt === 'string' ? row.expiresAt : undefined,
+      retiredAt: typeof row?.retiredAt === 'string' ? row.retiredAt : undefined,
+      session: typeof row?.session === 'string' ? row.session : undefined,
       importedFrom: file,
       provenance: row?.provenance ?? { kind: 'import', at: nowIso(), excerpt: undefined },
     }
@@ -3347,11 +3432,20 @@ function cmdRedact({ flags }) {
   let hits = 0
   const next = records.map((record) => {
     const fact = typeof record.fact === 'string' ? record.fact : ''
+    const excerpt = typeof record.provenance?.excerpt === 'string' ? record.provenance.excerpt : ''
     const result = redactWithCount(fact, config)
-    if (result.text === fact) return record
+    const resultEx = excerpt.length > 0 ? redactWithCount(excerpt, config) : { text: excerpt, hits: 0 }
+    // v37：excerpt 与 fact 一样会落盘、一样会进备份，必须一起扫。
+    if (result.text === fact && resultEx.text === excerpt) return record
     changed += 1
-    hits += result.hits
-    return { ...record, fact: result.text, redactedAt: nowIso(), redactedFrom: fact.slice(0, 120) }
+    hits += result.hits + resultEx.hits
+    const nextRecord = { ...record, fact: result.text, redactedAt: nowIso() }
+    // 不再把原文（可能是证件号）复制到 redactedFrom —— 那等于换个字段继续存。
+    delete nextRecord.redactedFrom
+    if (resultEx.text !== excerpt) {
+      nextRecord.provenance = { ...(record.provenance ?? {}), excerpt: resultEx.text }
+    }
+    return nextRecord
   })
   process.stdout.write(`扫描 ${records.length} 条：${changed} 条含敏感内容，共 ${hits} 处\n`)
   if (changed === 0) return
@@ -3617,6 +3711,40 @@ async function cmdBackup({ flags }) {
   process.stdout.write(`已备份到 ${davFileUrl(dav, uploaded)}\n  ${payload.declarations.length} 条声明 · ${Buffer.byteLength(text)} 字节\n`)
 }
 
+const COMMAND_HELP = {
+  init: ['准备数据目录（幂等）', 'init'],
+  declare: ['记一条结论（最常用）', 'declare --dim <维度> --fact "<一句话>" [--key <键>] [--core] [--ttl 30d] [--expires 2026-12-31] [--pending] [--scope project --scope-id <id>] [--session <id>] [--turn <n>] [--excerpt "<原话>"]'],
+  observe: ['记一轮行为信号（通常由插件自动调用）', 'observe [--tools a,b] [--turns 1]'],
+  build: ['把记录重算成画像（写 profile.json / profile.md / inject.md）', 'build [--all-scopes] [--scope-id <id>]'],
+  show: ['在终端看画像；--inject 看真实注入块', 'show [--json] [--inject] [--dim <维度>] [--with-keys]'],
+  status: ['一句话概览：有没有画像、几条、数据目录在哪', 'status'],
+  doctor: ['自检：宿主能力、目录、权限、各环节是否可用', 'doctor'],
+  panel: ['输出面板用的 JSON（宿主自己调，人一般不用）', 'panel'],
+  review: ['处理待审候选（模型提炼的低置信度条目）', 'review --accept <id|all> | --reject <id|all>'],
+  forget: ['删掉记录（可整批还原）；多个条件同时给表示「都要满足」', 'forget --id <id> | --ids a,b | --key <键> | --dim <维度> | --session <id> | --turn <n> | --expired | --all'],
+  retire: ['先放下：条目退出画像，记录留着', 'retire --id <id> | --ids a,b | --key <键> | --dim <维度> [--reason "<原因>"]'],
+  unretire: ['把「先放下」的条目拿回来', 'unretire --id <id> | --ids a,b | --key <键> | --dim <维度> | --all'],
+  pin: ['置顶：每一轮都带上，不受相关性筛选', 'pin --id <id> | --ids a,b | --key <键> | --dim <维度> | --all'],
+  unpin: ['取消置顶', 'unpin --id <id> | --ids a,b | --key <键> | --dim <维度> | --all'],
+  edit: ['改内容/维度/键/轻重/核心；改完打印新旧对照', 'edit --id <id> | --ids a,b [--fact "<新说法>"] [--dim <维度>] [--key <键>] [--weight 0.8] [--core true|false]'],
+  merge: ['把两条并成一条（保留 --keep，并入 --drop）', 'merge --keep <id> --drop <id>'],
+  dedupe: ['找相似条目并合并；默认只预览，--apply 才写', 'dedupe [--apply] [--pairs "<keep|drop,...>"] [--apply-pairs "<keep|drop,...>"]'],
+  import: ['从别的 AI 或旧备份导入（JSON 数组 / JSONL 都行）', 'import --file <路径> [--pending]'],
+  ingest: ['把「别的 AI 记得我」那段文字拆条入库', 'ingest --text "<粘贴>" | --file <路径> [--dry-run]'],
+  dims: ['看或改维度表', 'dims [add <id> <中文名>] [remove <id>] [reclassify]'],
+  snapshots: ['列出恢复点', 'snapshots'],
+  restore: ['从恢复点还原', 'restore --name <文件名>'],
+  set: ['改配置（键值见 set list）', 'set <键> <值> | set list'],
+  reset: ['把数据目录清空重来（先自动留快照）', 'reset --yes'],
+  export: ['导出成可读文件（JSON/JSONL）', 'export [--out <目录>]'],
+  validate: ['体检：坏行、结构异常、敏感内容', 'validate'],
+  explain: ['逐条说明这次为什么带/没带某条', 'explain [--text "<本轮用户的话>"]'],
+  health: ['画像健康度：新鲜度/覆盖度/精度/一致性/重点', 'health'],
+  redact: ['扫描并清理已有的敏感内容（默认预览）', 'redact [--apply]'],
+  backup: ['打包备份到本地或 WebDAV（可加密）', 'backup [--out <目录>] [--encrypt --passphrase <口令>]'],
+  unseal: ['解开加密备份', 'unseal --file <加密包> [--passphrase <口令>]'],
+}
+
 const COMMANDS = {
   init: cmdInit,
   declare: cmdDeclare,
@@ -3660,12 +3788,24 @@ const MUTATING = new Set(['declare', 'observe', 'build', 'review', 'forget', 're
 function main() {
   const { positional, flags } = parseArgs(process.argv.slice(2))
   const command = positional.shift()
-  if (command === undefined || command === 'help' || flags.help === true) {
-    process.stdout.write(`dsh-profile <命令>\n\n${Object.keys(COMMANDS).map((c) => `  ${c}`).join('\n')}\n\n详见 README.md\n`)
+  // v37：原来是"裸列表 + 详见 README.md"，而 README 里没有命令参考，等于让用户猜。
+  // 现在每个命令都有一句话说明，并且 `<命令> --help` 单独可用。
+  if (command === undefined || command === 'help') {
+    const width = Math.max(...Object.keys(COMMANDS).map((c) => c.length))
+    const lines = Object.keys(COMMANDS).map((c) => {
+      const [summary] = COMMAND_HELP[c] ?? ['', '']
+      return `  ${c.padEnd(width)}  ${summary}`
+    })
+    process.stdout.write(`dsh-profile <命令> [...参数]\n\n${lines.join('\n')}\n\n加 --help 看单个命令的用法：dsh-profile declare --help\n`)
     return
   }
   const handler = COMMANDS[command]
-  if (handler === undefined) die(`未知命令 ${command}`)
+  if (handler === undefined) die(`未知命令 ${command}（dsh-profile help 看全部）`)
+  if (flags.help === true) {
+    const [summary, usage] = COMMAND_HELP[command] ?? ['', command]
+    process.stdout.write(`${summary}\n\n用法：dsh-profile ${usage}\n`)
+    return
+  }
   // 有的命令（backup 上传备份）是 async 的：withLock 只保证「同步段」互斥，
   // 所以网络类命令不进 MUTATING，这里统一兜住返回的 Promise。
   const outcome = MUTATING.has(command)

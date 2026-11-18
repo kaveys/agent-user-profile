@@ -249,9 +249,11 @@ t('declare 落盘前自动脱敏并记溯源', () => {
   const record = readJsonl('declarations.jsonl').find((row) => (row.fact ?? '').includes('⟨手机号⟩'))
   ok(record !== undefined, '没找到脱敏后的记录')
   ok(!record.fact.includes('13800138000'), '手机号没被替换')
-  ok(record.provenance?.excerpt === '我电话是 13800138000', '溯源摘录丢了')
+  ok(typeof record.provenance?.excerpt === 'string' && record.provenance.excerpt.length > 0, '溯源摘录丢了')
+  ok(!record.provenance.excerpt.includes('13800138000'), '摘录里的手机号没被替换')
+  ok(record.provenance.excerpt.includes('⟨手机号⟩'), '摘录没有打码标记')
   const panel = JSON.parse(cliOk(['panel']).stdout)
-  ok(panel.items.some((item) => item.provenance?.excerpt === '我电话是 13800138000'), 'panel 未透出 provenance')
+  ok(panel.items.some((item) => typeof item.provenance?.excerpt === 'string' && item.provenance.excerpt.includes('⟨手机号⟩')), 'panel 未透出脱敏后的 provenance')
 })
 
 t('redact 默认只统计，--apply 才写回', () => {

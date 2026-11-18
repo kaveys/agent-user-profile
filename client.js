@@ -647,9 +647,9 @@ window.__ModuleLoader__.load({
             title: '从画像里拿掉，但记录留着（随时能恢复）',
             onClick: async () => {
               const total = pickedIds.length
-              await run({ action: 'retire', ids: pickedIds.join(',') })
+              const res = await run({ action: 'retire', ids: pickedIds.join(',') })
               setPicked({})
-              if (typeof notify === 'function') notify(`已把 ${total} 条先放下（记录留着，随时可恢复）`)
+              if (res?.ok !== false && typeof notify === 'function') notify(`已把 ${total} 条先放下（记录留着，随时可恢复）`)
             },
           }, '先放下'),
           h('button', {
@@ -673,9 +673,9 @@ window.__ModuleLoader__.load({
               }
               const total = pickedIds.length
               setBulkArmed(false)
-              await run({ action: 'forget', ids: pickedIds.join(',') })
+              const res = await run({ action: 'forget', ids: pickedIds.join(',') })
               setPicked({})
-              if (typeof notify === 'function') notify(`已删除 ${total} 条。删错了也不要紧：到「备份与重置」→「恢复点」可整批还原。`)
+              if (res?.ok !== false && typeof notify === 'function') notify(`已删除 ${total} 条。删错了也不要紧：到「备份与重置」→「恢复点」可整批还原。`)
             },
           }, bulkArmed === true ? `确认删除 ${pickedIds.length} 条` : '批量删除'),
           h('button', { style: styles.button, onClick: () => setPicked({}) }, '取消选择')),
@@ -1224,6 +1224,13 @@ window.__ModuleLoader__.load({
         setNotice('')
         try {
           const result = await postAction(payload)
+          // v37：宿主返回 ok:false 时 result 没有 output，原来会显示「已完成」——
+          // 批量删除/设核心失败却提示成功，是最坏的一种「看起来能用」。
+          if (result?.ok === false) {
+            if (options?.silent !== true) setNotice(`失败：${result?.error ?? '未知原因'}`)
+            await load(true)
+            return result
+          }
           if (options?.silent !== true) setNotice(result?.output ?? '已完成')
           await load(true)
           return result ?? { ok: true }

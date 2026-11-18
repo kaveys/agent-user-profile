@@ -31,7 +31,7 @@
 | **你习惯怎么做** | 先给结论再给理由；要有证据；做完要能跑起来 |
 | **你绝对不要什么** | 别动我的项目文件夹；别自作主张删东西；上传前必须打码 |
 
-清单上的每一条都能改：改说法、调轻重（很重要 / 一般 / 随口一提）、标成「底线」、删掉。删错了，去「备份与重置」点一下就能整批还原。
+清单上的每一条都能改：改说法、调轻重（高 / 中 / 低）、标成「核心」（面板上叫「设核心」，命令行是 `--core`）、删掉。删错了，去「备份与重置」点一下就能整批还原。
 
 ## 它不记什么
 
@@ -49,10 +49,16 @@ git clone https://github.com/kaveys/agent-user-profile.git
 cd agent-user-profile
 node bin/profile.mjs init
 node bin/profile.mjs declare --dim taste --fact "用户偏爱克制的深色界面" --confidence 0.9
+node bin/profile.mjs declare --dim constraints --fact "对外发布前必须彻底脱敏" --core
+node bin/profile.mjs declare --dim communication --fact "先给结论，再给证据"
 node bin/profile.mjs build && node bin/profile.mjs show
 ```
 
-四行命令之后，你会看到一份整理好的清单——就是这个插件平时喂给 AI 的东西。
+跑完你会看到一份整理好的清单——就是这个插件平时喂给 AI 的东西。
+
+只记一两条时它会显示「数据不足」：**至少 3 条才会开始注入**（这是防止它凭一句随口的话就给你下定义）。再加两条就绪。
+
+想看每条对应的 key 和 id（后面 `pin` / `retire` / `edit` 要用）：`node bin/profile.mjs show --with-keys`。
 
 ### 在 DeepSeek Harness 里用
 
@@ -60,6 +66,8 @@ node bin/profile.mjs build && node bin/profile.mjs show
 cp -r agent-user-profile ~/.dsh/plugins/dsh-user-profile
 node ~/.dsh/plugins/dsh-user-profile/scripts/register.mjs   # 注册 + 给每个 profile 建链接
 ```
+
+**更新到新版本**：不要用 `cp -r` 叠在旧目录上（会变成 `dsh-user-profile\agent-user-profile` 套娃，跑的还是旧版）。先删旧目录再复制，或用 `robocopy <新目录> %USERPROFILE%\.dsh\plugins\dsh-user-profile /MIR /XD .git node_modules`；复制完再跑一次 `register.mjs`。
 
 然后重启一次 DeepSeek Harness。设置里会多出「用户画像」一栏，七个页签：概览、条目、待审、冲突与历史、维度、设置、备份与重置。
 
@@ -91,16 +99,16 @@ node mcp/server.mjs
 能。每次删除前自动留一份快照（最多 20 份），面板上一键还原。
 
 **有几条我每次都想让它知道？**
-把那条**置顶**。置顶的条目排在最前面，而且不受「这轮相关不相关」的筛选影响——哪怕你只是在查一个报错，它也会带上。面板行内点「置顶」，或者命令行 `profile pin --key <键>`。
+把那条**置顶**。置顶的条目排在最前面，而且不受「这轮相关不相关」的筛选影响——哪怕你只是在查一个报错，它也会带上。面板行内点「置顶」，或者命令行 `node bin/profile.mjs pin --key <键>`（装好之后也可以直接用 `dsh-profile pin --key <键>`）。
 
 **暂时不想让它影响我，但又想留着记录？**
-用「先放下」（`profile retire`）。条目退出画像、不再进提示，记录和来源都还在，随时「恢复」；它和删除的区别是：删除是抹掉，先放下只是不用了。失效的条目在面板「数据」页能一次全部恢复。
+用「先放下」（`node bin/profile.mjs retire`）。条目退出画像、不再进提示，记录和来源都还在，随时「恢复」；它和删除的区别是：删除是抹掉，先放下只是不用了。失效的条目在面板「备份与重置」页能一次全部恢复。
 
 **记的东西会过期吗？**
-会分两种。临时状态可以自己带保质期：`profile declare --ttl 7d`（或 `--expires 2026-12-31`），到期就退出画像，记录还留着。偏好类的东西不设硬期限，但久到没人再提起会慢慢变淡——不再自动带进对话，条目仍在，面板「数据」页能看到多少条被淡化了。钉住的条目永不淡化。
+会分两种。临时状态可以自己带保质期：`node bin/profile.mjs declare --ttl 7d`（或 `--expires 2026-12-31`），到期就退出画像，记录还留着。偏好类的东西不设硬期限，但久到没人再提起会慢慢变淡——不再自动带进对话，条目仍在，面板「备份与重置」页能看到多少条被淡化了。钉住的条目永不淡化。
 
 **随口一句会不会盖掉我明确要求过的事？**
-不会。两条说的是同一件事时，先比可信度：你明确说过的（1.0）不会被模型提炼的一句（0.6）顶掉，只会挂成「待确认」让你裁决。如果你就是想让新的盖掉旧的，`profile set conflicts.strategy newest` 可以退回老规矩。
+不会。两条说的是同一件事时，先比可信度：你明确说过的（1.0）不会被模型提炼的一句（0.6）顶掉，只会挂成「待确认」让你裁决。如果你就是想让新的盖掉旧的，`node bin/profile.mjs set conflicts.strategy newest` 可以退回老规矩。
 
 **占多少空间？**
 一份清单几十 KB，加历史留档也就几百 KB，不含任何图片和聊天记录。
