@@ -26,7 +26,7 @@ import { createInterface } from 'node:readline'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CLI = join(HERE, '..', 'bin', 'profile.mjs')
 const HOME = process.env.DSH_USER_PROFILE_HOME || join(homedir(), '.dsh', 'user-profile')
-const SERVER_INFO = { name: 'agent-user-profile', version: '0.4.1' }
+const SERVER_INFO = { name: 'agent-user-profile', version: '0.4.2' }
 const PROTOCOL_FALLBACK = '2024-11-05'
 
 const log = (message) => process.stderr.write(`[user-profile-mcp] ${message}\n`)

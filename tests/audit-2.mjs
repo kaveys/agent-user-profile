@@ -169,10 +169,11 @@ const rjl = (home, rel) => {
   const home = fresh()
   // 40 条必须彼此不同，否则会被去重合并成一条，测不到预算截断
   const uniq = ['配色', '留白', '字体', '间距', '圆角', '阴影', '动效', '图标', '文案', '层级', '对齐', '密度', '对比', '节奏', '网格', '边框', '透明', '渐变', '字号', '行高', '图标集', '按钮', '卡片', '表格', '弹窗', '提示', '空态', '错误', '加载', '搜索', '筛选', '排序', '分页', '导航', '页签', '徽章', '进度', '滑块', '开关', '复选框']
-  for (let i = 0; i < 40; i += 1) run(home, ['declare', '--dim', 'constraints', `--fact`, `约束${i}${uniq[i]}${uniq[(i + 13) % 40]}`, '--confidence', '0.9', '--core'])
+  // v31 起红线（--core / constraints）是 mandatory、永不被预算裁，所以这里用非强制维度测截断
+  for (let i = 0; i < 40; i += 1) run(home, ['declare', '--dim', 'taste', `--fact`, `偏好${i}${uniq[i]}${uniq[(i + 13) % 40]}`, '--confidence', '0.9'])
   run(home, ['set', 'inject.maxChars', '400', '--rebuild'])
   const inject = readFileSync(join(home, 'inject.md'), 'utf8')
-  ok('核心条目超出预算时被截断且有提示', inject.length < 1600 && /还有|未带入|截断|其余/.test(inject), `${inject.length} 字符`)
+  ok('超出预算的条目被截断且有提示', inject.length < 1600 && /还有|未带入|截断|其余/.test(inject), `${inject.length} 字符`)
 }
 
 // 14. 导入不存在的文件

@@ -6,9 +6,10 @@
 
 | 项 | 值 |
 | --- | --- |
-| 声明范围 | `dsh.compat.hosts: ">=0.2.0"`（`package.json`） |
+| 宿主版本门槛 | **不声明**（`package.json` 里没有 `dsh.compat.hosts`；早期文档写过这一行，但没有任何宿主读它，属虚标，已删除） |
+| 实测过的宿主 | DSH 桌面版 `0.2.2-rc.3`（`@deepseek-ai/dsh-desktop` 与 runtime `@deepseek-ai/dsh` 同为该版本，Node 24.21.0） |
 | 实际策略 | **能力探测**，不是版本号判断：启动时逐项探测宿主 API，能用就用，不能用就降级 |
-| Node | `>= 20`（`engines.node`） |
+| Node | `>= 20`（`engines.node`，这是唯一真实的版本声明） |
 | 独立运行 | 不需要宿主：CLI（`bin/profile.mjs`）与 MCP server（`mcp/server.mjs`）单独可跑 |
 
 版本号只用于「说明我大概适配到哪一代」，**真正的判断依据永远是探测结果**：DSH 0.2.x 的多个 rc 之间 API 也有差异，写死版本号会误判。

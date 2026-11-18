@@ -5,6 +5,21 @@ The portrait schema version is tracked separately and lives in `config.json`.
 
 ## Unreleased
 
+### v34 — budget cuts now leave a trace, one ring of restore points
+
+Two behaviours promised by the UI finally match the code, plus a documentation claim that was never true.
+
+#### Fixed
+
+- **A whole section cut by the budget used to vanish silently.** With `inject.maxChars` smaller than the red-line section, `inject.md` ended up shorter with no explanation — you could not tell "portrait is small" from "portrait was truncated". `renderInject()` now counts every item that was dropped and appends `（另有 N 条未带入：调大 inject.maxChars，或把 inject.maxChars 设为 0）`.
+- **Restore points were a ring per command, not one ring of 20.** `snapshotDeclarations()` kept 20 files *per tag*, so a bulk retire + edit + dedupe could leave 60+ files while the panel says "快照上限 20 份". The cap is now global across all `declarations-*.jsonl`, ordered by mtime — 20 files means 20 restore points.
+
+#### Changed
+
+- `docs/COMPATIBILITY.md` no longer claims `dsh.compat.hosts` is declared in `package.json`. It never was; no host reads that key. The file now states the real contract: no version gate, capability probing, measured against DSH 0.2.2-rc.3, `engines.node >= 20`.
+- `tests/audit-2.mjs` measures budget truncation on a non-mandatory dimension (`taste`). Red lines have been mandatory since v31, so the old fixture asserted a cut that can no longer happen.
+- `tests/audit-4.mjs` expects 14 MCP tools (was 12 before `profile_pin` / `profile_retire`).
+
 ### v33 — shorter narration, 54 s film
 
 Every narrated scene was rewritten to say the same thing in fewer words: 398 characters → **253** (‑37%), one idea per sentence, no clause stacking. The film goes 95.1 s → **53.9 s** without dropping a single scene or touching the visuals.

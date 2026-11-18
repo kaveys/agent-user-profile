@@ -19,6 +19,7 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
   writeSync,
@@ -1587,6 +1588,8 @@ function renderInject(profile, config) {
 
   const body = [...head]
   let used = head.join('\n').length
+  // 整段被预算挡掉的条数：不写空标题，但要在末尾说明 —— 否则用户只看到画像变短，不知道是被裁了
+  let hidden = 0
 
   /**
    * 逐段写正文。
@@ -1611,7 +1614,10 @@ function renderInject(profile, config) {
       lines.push(line)
       used += line.length + 1
     }
-    if (lines.length === 0) return
+    if (lines.length === 0) {
+      hidden += cut
+      return
+    }
     body.push(title)
     used += title.length + 1
     for (const line of lines) body.push(line)
@@ -1630,6 +1636,9 @@ function renderInject(profile, config) {
 
   if (restCutByK > 0) {
     body.push(`（另有 ${restCutByK} 条背景参考被 inject.topK=${restK} 限制在外；设 0 可全部带入）`)
+  }
+  if (hidden > 0) {
+    body.push(`（另有 ${hidden} 条未带入：调大 inject.maxChars，或把 inject.maxChars 设为 0）`)
   }
   if (profile.stats.pending > 0) {
     body.push(`（有 ${profile.stats.pending} 条待审候选未进画像）`)
@@ -2168,13 +2177,16 @@ function snapshotDeclarations(tag) {
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
     const dest = join(dir, `declarations-${tag}-${Date.now()}.jsonl`)
     copyFileSync(file, dest)
+    // 上限按「全部恢复点」算，而不是每种操作各留 20 份：
+    // 面板印的是「快照上限 20 份」，按 tag 分桶会让一次批量操作就堆出上百个文件，恢复点环被提前转掉。
     const olds = readdirSync(dir)
-      .filter((name) => name.startsWith(`declarations-${tag}-`))
-      .sort()
-    while (olds.length > 20) {
+      .filter((name) => /^declarations-.+\.jsonl$/.test(name) && name !== basename(dest))
+      .map((name) => ({ name, at: statSync(join(dir, name)).mtimeMs }))
+      .sort((a, b) => a.at - b.at)
+    while (olds.length >= 20) {
       const victim = olds.shift()
       try {
-        unlinkSync(join(dir, victim))
+        unlinkSync(join(dir, victim.name))
       } catch {
         // 删不掉旧快照不影响本次
       }
