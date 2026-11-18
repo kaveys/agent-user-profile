@@ -11,7 +11,7 @@ param(
   [string]$Voice   = '',
   [string]$Speed   = '0.92',
   [string]$Seed    = '3',
-  [string]$Tempo   = '0.9',
+  [string]$Tempo   = '1.15',
   [switch]$NoTtsRefresh
 )
 
@@ -137,13 +137,13 @@ function Draw-Subtitle($g, [string]$s) {
 $Scenes = @(
   @{
     Name = '01-hook'
-    Narration = '你有没有遇到过这种事。同一个 AI，昨天刚说过的话，今天它就不记得了。'
-    Subtitle  = '同一个 AI，换个对话就像换了个人'
+    Narration = '它读过整个互联网，却记不住你昨天说的一句话。换个对话，你又变回陌生人。'
+    Subtitle  = '不是它笨，是它不认识你'
     Draw = {
       param($g)
-      TxtCenter $g '昨天刚说过的话' 210 74 $C.text $true
-      TxtCenter $g '今天它全忘了' 320 74 $C.warn $true
-      TxtCenter $g '不是它不聪明，是它不认识你' 460 34 $C.dim
+      TxtCenter $g '它读过整个互联网' 158 70 $C.text $true
+      TxtCenter $g '却记不住你昨天说的话' 258 70 $C.accent $true
+      TxtCenter $g '换个对话，你又成了陌生人' 402 36 $C.dim
     }
   },
   @{
@@ -219,6 +219,34 @@ $Scenes = @(
         $idx++
       }
       Dots $g 700 424 0 0 $C.faint $C.faint
+    }
+  },
+  @{
+    Name = '04b-vs'
+    Narration = '那它和别的记忆插件差在哪。别的大多只存聊天记录，用的时候再翻。它把记忆整理成一张清单，每次开口前自动读一遍；记的不只是你说的话，还有你是什么样的人。'
+    Subtitle  = '别人存聊天记录，它留下一张关于你的清单'
+    Draw = {
+      param($g)
+      Txt $g '和别的记忆插件，差在哪' 80 66 50 $C.text $true 900
+      Txt $g '别人存的是记录，它留下的是你' 82 136 28 $C.dim $false 900
+      Txt $g '别的记忆插件' 84 196 25 $C.faint $true 380
+      Txt $g '这个' 648 196 25 $C.accent $true 200
+      $rows = @(
+        @('存聊天记录，用的时候翻出来', '整理成一张清单，开口前先读'),
+        @('记你说过什么', '还记你是什么样的人'),
+        @('删了就没了', '能改能删，删错能还原')
+      )
+      $y = 232
+      foreach ($r in $rows) {
+        RoundRect $g 80 $y 500 96 16 $C.card2
+        Txt $g $r[0] 108 ($y + 30) 25 $C.faint $false 450
+        RoundRect $g 620 $y 580 96 16 $C.card $C.line 2
+        $bar = [Drawing.SolidBrush]::new($C.accent)
+        $g.FillRectangle($bar, (Px 622), (Px ($y + 20)), (Px 4), (Px 56))
+        $bar.Dispose()
+        Txt $g $r[1] 650 ($y + 30) 25 $C.text $false 520
+        $y += 112
+      }
     }
   },
   @{
@@ -368,16 +396,21 @@ $t = 0.0; $idx = 0
 foreach ($scene in $Scenes) {
   $idx++
   $png = Join-Path $Work ("{0}.png" -f $scene.Name)
-  $wav = Join-Path $Work ("{0}.wav" -f $scene.Name)
-  $mp3 = Join-Path $Work ("{0}.mp3" -f $scene.Name)
   $mp4 = Join-Path $Work ("{0}.mp4" -f $scene.Name)
   $txt = Join-Path $Work ("{0}.txt" -f $scene.Name)
 
-  if (-not (Test-Path $png)) {
-    $pair = New-Slide { param($g) & $scene.Draw $g; Draw-Subtitle $g $scene.Subtitle }
-    $bmp = $pair[0]; $gfx = $pair[1]
-    $gfx.Dispose(); $bmp.Save($png, [Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
-  }
+  # 每次都重画：留着旧图会让抽帧检查通过、成片却还是上一版文案
+  $pair = New-Slide { param($g) & $scene.Draw $g; Draw-Subtitle $g $scene.Subtitle }
+  $bmp = $pair[0]; $gfx = $pair[1]
+  $gfx.Dispose(); $bmp.Save($png, [Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
+
+  # 配音按「文案+引擎+音色+速度」指纹缓存：改了文案就必然重配，没改就复用
+  $sig = '{0}|{1}|{2}|{3}|{4}' -f $scene.Narration, $Engine, $Voice, $Seed, $Tempo
+  $sigBytes = [Text.Encoding]::UTF8.GetBytes($sig)
+  $sigHash = [Security.Cryptography.SHA256]::Create().ComputeHash($sigBytes)
+  $sigKey = (($sigHash[0..5] | ForEach-Object { $_.ToString('x2') }) -join '')
+  $wav = Join-Path $Work ("{0}.{1}.wav" -f $scene.Name, $sigKey)
+  $mp3 = Join-Path $Work ("{0}.{1}.mp3" -f $scene.Name, $sigKey)
 
   if ($useChat -or $useKokoro -or $useEdge) {
     if (-not (Test-Path $wav)) {
@@ -416,13 +449,12 @@ foreach ($scene in $Scenes) {
   $hold = [Math]::Round($dur + 0.55, 2)
   $fadeOut = [Math]::Max(0, $hold - 0.4)
 
-  if (-not (Test-Path $mp4)) {
-    & $Ffmpeg -y -loglevel error -loop 1 -i $png -i $wav `
-      -vf ("scale={0}:{1},fade=t=in:st=0:d=0.3,fade=t=out:st={2}:d=0.4" -f $W, $H, $fadeOut) `
-      -af 'apad=pad_dur=0.55' -t $hold `
-      -c:v libx264 -preset slow -crf 17 -pix_fmt yuv420p -r 30 `
-      -c:a aac -b:a 192k -ar 44100 -ac 1 $mp4
-  }
+  # 分段每次都重建：图片或配音变了而分段还留着，成片就会是上一版的画面
+  & $Ffmpeg -y -loglevel error -loop 1 -i $png -i $wav `
+    -vf ("scale={0}:{1},fade=t=in:st=0:d=0.3,fade=t=out:st={2}:d=0.4" -f $W, $H, $fadeOut) `
+    -af 'apad=pad_dur=0.55' -t $hold `
+    -c:v libx264 -preset slow -crf 17 -pix_fmt yuv420p -r 30 `
+    -c:a aac -b:a 192k -ar 44100 -ac 1 $mp4
 
   $segments += $mp4
   $timeline += [pscustomobject]@{ Scene = $scene.Name; Start = $t; End = ($t + $hold) }
