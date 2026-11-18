@@ -8,8 +8,9 @@
  *
  * 用法：node _render.mjs
  */
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -85,7 +86,18 @@ const ReactStub = { useState, useCallback, useEffect, createElement }
 
 // ---------------------------------------------------------------- 假宿主
 
-const panelJson = execFileSync(process.execPath, [CLI, 'panel'], { encoding: 'utf8', timeout: 20000 })
+// 必须自己造一份数据：CI 的 runner 上没有 ~/.dsh/user-profile，
+// 之前直接读真实目录 → 条目页为空 → 三条断言在 Linux 上必然失败（Windows 上因为有本地画像才通过）。
+const home = mkdtempSync(join(tmpdir(), 'dsh-render-'))
+const env = { ...process.env, DSH_USER_PROFILE_HOME: home, DSH_PROFILE_DIAG: '0' }
+const cli = (args) => execFileSync(process.execPath, [CLI, ...args], { encoding: 'utf8', timeout: 30000, env })
+cli(['init'])
+cli(['declare', '--dim', 'constraints', '--fact', '用户要求上传前必须彻底脱敏', '--confidence', '0.9', '--core'])
+cli(['declare', '--dim', 'taste', '--fact', '用户要求界面有留白和层次', '--confidence', '0.8'])
+cli(['declare', '--dim', 'habits', '--fact', '用户习惯先给结论再给证据', '--confidence', '0.6'])
+cli(['build', '--all-scopes'])
+
+const panelJson = cli(['panel'])
 const panel = JSON.parse(panelJson)
 check('payload 不再包含存储路径', panel.paths === undefined)
 check('payload 不再包含活跃/工具统计', panel.activity === undefined && panel.toolMix === undefined && panel.hours === undefined)
@@ -256,6 +268,7 @@ check('备份页有宿主能力区', /宿主能力/.test(seen['备份与重置']
 check('备份页有「从别的 AI 搬回来」入口', /从别的 AI 搬回来/.test(seen['备份与重置'] ?? '') && /先看看怎么归类/.test(seen['备份与重置'] ?? ''), '导入入口应出现在备份与重置')
 check('备份页有体检 / 脱敏 / 备份三组入口', /体检条目/.test(seen['备份与重置'] ?? '') && /脱敏/.test(seen['备份与重置'] ?? '') && /WebDAV/.test(seen['备份与重置'] ?? ''))
 
+try { rmSync(home, { recursive: true, force: true }) } catch {}
 process.stdout.write(failures === 0 ? '\n渲染烟测全部通过\n' : `\n渲染烟测失败 ${failures} 项\n`)
 process.exit(failures === 0 ? 0 : 1)
 
