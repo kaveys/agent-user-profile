@@ -1349,6 +1349,9 @@ function buildDimensions(declarations, observed, config) {
   const byKey = new Map()
   for (const record of declarations) {
     if (typeof record?.fact !== 'string' || record.fact.trim().length === 0) continue
+    // 软失效（retire）：记录本身留在 declarations.jsonl 里（随时能恢复、也不丢溯源），
+    // 但不再进画像、不再参与冲突裁决 —— 「不想要了」和「从没记过」是两件事。
+    if (record.retiredAt) continue
     const dim = typeof record.dim === 'string' ? record.dim : 'taste'
     const key = `${dim}::${record.key ?? dim}`
     const list = byKey.get(key) ?? []
@@ -1371,6 +1374,9 @@ function buildDimensions(declarations, observed, config) {
       weight: typeof record.confidence === 'number' ? record.confidence : 1,
       source: record.source ?? 'user',
       core: record.core === true,
+      // 置顶（pin）：用户亲手钉住的条目，注入时必须带上，不受相关性闸门影响。
+      pinned: record.pinnedAt ? true : undefined,
+      pinnedAt: record.pinnedAt,
       scope: record.scope ?? 'global',
       scopeId: record.scopeId,
       // 溯源：面板与 show 用它回答「这条是从哪来的」
@@ -1532,9 +1538,10 @@ function renderMarkdown(profile, config) {
     for (const item of items) {
       const tag = item.kind === 'declared' ? '已确认' : '我的观察'
       const core = isCore({ ...item, dim }, config) ? '核心 · ' : ''
+      const pin = item.pinned === true ? '置顶 · ' : ''
       const frozen = item.frozen === true ? ' · 未决' : ''
       const scope = item.scope && item.scope !== 'global' ? ` · ${item.scope}${item.scopeId ? `:${item.scopeId}` : ''}` : ''
-      lines.push(`- [${core}${tag} ${round(item.weight ?? 0, 2)}${frozen}${scope}] ${safeText(item.text)}`)
+      lines.push(`- [${pin}${core}${tag} ${round(item.weight ?? 0, 2)}${frozen}${scope}] ${safeText(item.text)}`)
     }
   }
   const openConflicts = (profile.conflicts ?? []).filter((c) => c.status !== 'resolved' && c.status !== 'merged')
@@ -1585,9 +1592,12 @@ function renderInject(profile, config) {
     : (prioritize ? DEFAULT_CONFIG.inject.personalizeDimensions : [])
 
   const all = flatten(profile, config)
-  const redline = all.filter((item) => item.core)
-  const personalize = all.filter((item) => !item.core && personalizeDims.includes(item.dim))
-  const restAll = all.filter((item) => !item.core && !personalizeDims.includes(item.dim))
+  // 置顶条目单独成段、排最前：它们不受相关性闸门与 topK 影响，属于「每轮都该知道」。
+  const pinned = all.filter((item) => item.pinned === true)
+  const pool = pinned.length > 0 ? all.filter((item) => item.pinned !== true) : all
+  const redline = pool.filter((item) => item.core)
+  const personalize = pool.filter((item) => !item.core && personalizeDims.includes(item.dim))
+  const restAll = pool.filter((item) => !item.core && !personalizeDims.includes(item.dim))
   const rest = restK > 0 ? restAll.slice(0, restK) : restAll
   const restCutByK = restAll.length - rest.length
 
@@ -1638,6 +1648,8 @@ function renderInject(profile, config) {
     body.push('')
   }
 
+  pushSection('## 零、钉住（每轮必带）', pinned, (cut) =>
+    `（置顶条目还有 ${cut} 条超出预算没放下：调大 inject.maxChars，或把 inject.maxChars 设为 0）`)
   pushSection('## 一、红线与硬要求', redline, (cut) =>
     `（红线还有 ${cut} 条超出预算没放下：调大 inject.maxChars，或把 inject.maxChars 设为 0）`)
   pushSection('## 二、个性化首选', personalize, (cut) =>
@@ -1700,6 +1712,9 @@ function cmdBuild({ flags }) {
       observedTtlDays: config.build.observedTtlDays,
       pending: countPending(),
       items: Object.values(dimensions).reduce((n, s) => n + s.items.length, 0),
+      // 软失效的条目：不在画像里，但记录还在（面板「数据」页给个数，免得以为凭空少了几条）
+      retired: readJsonl(p('declarations.jsonl')).filter((row) => row.retiredAt !== undefined).length,
+      pinned: Object.values(dimensions).reduce((n, s) => n + s.items.filter((item) => item.pinned === true).length, 0),
     },
     dimensions,
     conflicts,
@@ -1950,6 +1965,7 @@ function cmdPanel() {
       text: item.text,
       weight: round(item.weight ?? 0, 2),
       core: item.core === true,
+      pinned: item.pinned === true,
       frozen: item.frozen === true,
       scope: item.scope ?? 'global',
       scopeId: item.scopeId ?? null,
@@ -2256,6 +2272,85 @@ function cmdForget({ flags }) {
   process.stdout.write(`已删除 ${removed} 条${where}（剩余 ${kept.length} 条；画像已刷新）\n`)
 }
 
+/** retire/unretire/pin/unpin 共用的选取器：--id / --key / --dim / --all。 */
+function declarationSelector(flags, name) {
+  const id = typeof flags.id === 'string' ? flags.id : ''
+  const key = typeof flags.key === 'string' ? flags.key : ''
+  const dim = typeof flags.dim === 'string' ? flags.dim : ''
+  const all = flags.all === true
+  if (!all && id === '' && key === '' && dim === '') {
+    die(`用法：${name} --id <id> | --key <key> | --dim <维度> | --all`)
+  }
+  return {
+    hit: (record) => {
+      if (all) return true
+      if (id !== '' && record.id === id) return true
+      if (key !== '' && record.key === key) return true
+      if (dim !== '' && record.dim === dim) return true
+      return false
+    },
+  }
+}
+
+/** 只改状态字段（retiredAt / pinnedAt），不动正文：改完统一 rebuild，保证画像与注入同步。 */
+function markDeclarations(flags, name, pick, change) {
+  const selector = declarationSelector(flags, name)
+  const file = p('declarations.jsonl')
+  const records = readJsonl(file)
+  let touched = 0
+  const next = records.map((record) => {
+    if (!pick(record) || !selector.hit(record)) return record
+    touched += 1
+    return change(record)
+  })
+  if (touched === 0) die('没有匹配的条目（或状态已经是想要的）')
+  snapshotDeclarations(name)
+  writeJsonl(file, next)
+  rebuildQuietly()
+  return touched
+}
+
+/**
+ * 软失效（retire）：条目退出画像，但记录、溯源、历史全都留着。
+ * 「这条不该再影响我」和「这条从没存在过」是两件事：前者可恢复，后者才是 forget。
+ */
+function cmdRetire({ flags }) {
+  const at = nowIso()
+  const reason = typeof flags.reason === 'string' && flags.reason.trim().length > 0 ? flags.reason.trim() : undefined
+  const touched = markDeclarations(flags, 'retire', (record) => record.retiredAt === undefined, (record) => ({
+    ...record,
+    retiredAt: at,
+    retireReason: reason,
+  }))
+  process.stdout.write(`已失效 ${touched} 条（记录保留，随时可恢复：profile unretire --id <id>）\n（画像已刷新）\n`)
+}
+
+function cmdUnretire({ flags }) {
+  const touched = markDeclarations(flags, 'unretire', (record) => record.retiredAt !== undefined, (record) => {
+    const next = { ...record }
+    delete next.retiredAt
+    delete next.retireReason
+    return next
+  })
+  process.stdout.write(`已恢复 ${touched} 条\n（画像已刷新）\n`)
+}
+
+/** 置顶（pin）：每轮注入必带，不受相关性闸门、topK、预算段次影响（排在最前）。 */
+function cmdPin({ flags }) {
+  const at = nowIso()
+  const touched = markDeclarations(flags, 'pin', (record) => record.pinnedAt === undefined, (record) => ({ ...record, pinnedAt: at }))
+  process.stdout.write(`已置顶 ${touched} 条（每轮都会带上）\n（画像已刷新）\n`)
+}
+
+function cmdUnpin({ flags }) {
+  const touched = markDeclarations(flags, 'unpin', (record) => record.pinnedAt !== undefined, (record) => {
+    const next = { ...record }
+    delete next.pinnedAt
+    return next
+  })
+  process.stdout.write(`已取消置顶 ${touched} 条\n（画像已刷新）\n`)
+}
+
 /** 既然记录是 append-only，改一条 = 先删后加：旧值进 changelog，便于回溯。 */
 function cmdEdit({ flags }) {
   const id = typeof flags.id === 'string' ? flags.id : ''
@@ -2301,7 +2396,15 @@ function cmdEdit({ flags }) {
   appendJsonl(p('changelog.jsonl'), { at: record.editedAt, kind: 'edit', id, before, after: { ...record } })
   rebuildQuietly()
   const redactNote = edited.hits > 0 ? `（已脱敏 ${edited.hits} 处敏感内容）` : ''
-  process.stdout.write(`已修改 ${id}：[${record.dim}] ${record.fact}${redactNote}\n（画像已刷新）\n`)
+  // 新旧对照：改完只播报「改成了什么」，用户没法判断改对没改对。
+  const diff = []
+  if (before.fact !== record.fact) diff.push(`  内容：${before.fact}`, `     → ${record.fact}`)
+  if (before.dim !== record.dim) diff.push(`  大类：${before.dim} → ${record.dim}`)
+  if (before.key !== record.key) diff.push(`  键：${before.key} → ${record.key}`)
+  if (Number(before.confidence) !== Number(record.confidence)) diff.push(`  权重：${round(before.confidence ?? 0, 2)} → ${round(record.confidence ?? 0, 2)}`)
+  if ((before.core === true) !== (record.core === true)) diff.push(`  核心：${before.core === true ? '是' : '否'} → ${record.core === true ? '是' : '否'}`)
+  const head = diff.length > 0 ? diff.join('\n') : `  内容：[${record.dim}] ${record.fact}（其余字段未变）`
+  process.stdout.write(`已修改 ${id}：\n${head}${redactNote}\n（画像已刷新；想撤销就 profile edit --id ${id} 再改回去）\n`)
 }
 
 /**
@@ -3321,6 +3424,10 @@ const COMMANDS = {
   panel: cmdPanel,
   review: cmdReview,
   forget: cmdForget,
+  retire: cmdRetire,
+  unretire: cmdUnretire,
+  pin: cmdPin,
+  unpin: cmdUnpin,
   edit: cmdEdit,
   merge: cmdMerge,
   dedupe: cmdDedupe,
@@ -3344,7 +3451,7 @@ const COMMANDS = {
 // 并发时后写的一方会把前一方刚加的记录覆盖掉（这正是丢记录的元凶）。
 // 追加型命令（declare/observe）也一并加锁：否则它可能恰好插在别人「读」和「写回」之间，
 // 追加的那条会被整表写回抹掉——这正是实测丢 3 条声明的现场。
-const MUTATING = new Set(['declare', 'observe', 'build', 'review', 'forget', 'edit', 'merge', 'import', 'dims', 'set', 'reset', 'restore', 'validate', 'redact', 'ingest', 'dedupe'])
+const MUTATING = new Set(['declare', 'observe', 'build', 'review', 'forget', 'retire', 'unretire', 'pin', 'unpin', 'edit', 'merge', 'import', 'dims', 'set', 'reset', 'restore', 'validate', 'redact', 'ingest', 'dedupe'])
 
 function main() {
   const { positional, flags } = parseArgs(process.argv.slice(2))

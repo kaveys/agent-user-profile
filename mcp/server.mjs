@@ -12,7 +12,7 @@
  *   - 生命周期：initialize → notifications/initialized → tools/list、tools/call…
  *   - 结果形状：{ content: [{ type: 'text', text }] }，出错用 isError: true。
  *
- * 十个工具全部是「参数 → 调 CLI → 回文本」的薄封装：不重复实现业务逻辑，
+ * 十四个工具全部是「参数 → 调 CLI → 回文本」的薄封装：不重复实现业务逻辑，
  * 也就不存在「MCP 版和 CLI 版行为不一致」这种经典毛病。
  */
 import { spawnSync } from 'node:child_process'
@@ -104,6 +104,31 @@ const TOOLS = [
         key: { type: 'string', description: '按 key 删' },
         dim: { type: 'string', description: '按大类删' },
         all: { type: 'boolean', description: '清空所有条目' },
+      },
+    },
+  },
+  {
+    name: 'profile_retire',
+    description: '软失效：让条目退出画像，但记录与来源都留着，随时可以恢复。用户说「这条先别用了」时用它；真要抹掉才用 profile_forget。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: '条目 id' },
+        key: { type: 'string', description: '按 key 失效' },
+        reason: { type: 'string', description: '为什么先放下（可留空）' },
+        undo: { type: 'boolean', description: 'true = 恢复（unretire）；默认 false = 失效' },
+      },
+    },
+  },
+  {
+    name: 'profile_pin',
+    description: '置顶/取消置顶：置顶的条目每轮都会注入，不受相关性筛选影响。适合「每次都要知道的硬偏好」。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: '条目 id' },
+        key: { type: 'string', description: '按 key 置顶' },
+        unpin: { type: 'boolean', description: 'true = 取消置顶' },
       },
     },
   },
@@ -247,6 +272,27 @@ function callTool(name, args = {}) {
     else if (args.key) flags.push('--key', String(args.key))
     else if (args.dim) flags.push('--dim', String(args.dim))
     else return errText('至少给一个条件：id / key / dim / all')
+    const result = runCli(flags)
+    return result.ok ? okText(result.text) : errText(result.text)
+  }
+
+  if (name === 'profile_retire') {
+    const flags = [args.undo === true ? 'unretire' : 'retire']
+    if (args.id) flags.push('--id', String(args.id))
+    else if (args.key) flags.push('--key', String(args.key))
+    else return errText('至少给一个条件：id / key')
+    if (args.undo !== true && typeof args.reason === 'string' && args.reason.trim().length > 0) {
+      flags.push('--reason', args.reason.trim())
+    }
+    const result = runCli(flags)
+    return result.ok ? okText(result.text) : errText(result.text)
+  }
+
+  if (name === 'profile_pin') {
+    const flags = [args.unpin === true ? 'unpin' : 'pin']
+    if (args.id) flags.push('--id', String(args.id))
+    else if (args.key) flags.push('--key', String(args.key))
+    else return errText('至少给一个条件：id / key')
     const result = runCli(flags)
     return result.ok ? okText(result.text) : errText(result.text)
   }

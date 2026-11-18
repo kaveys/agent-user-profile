@@ -5,6 +5,20 @@ The portrait schema version is tracked separately and lives in `config.json`.
 
 ## Unreleased
 
+### v30 — pinned entries, soft retire, before/after on edit
+
+#### Added
+- **`profile pin` / `unpin`**: a pinned entry gets its own injected section (`## 零、钉住（每轮必带）`) and is exempt from the relevance gate (`PINNED_SECTION` in `lib/relevance.mjs`), so it reaches the model every turn even when the current request has nothing to do with it. Distinction that matters: **core** is about priority within a turn, **pinned** is about presence in every turn.
+- **`profile retire` / `unretire`**: soft invalidation. The entry leaves the profile but the record stays in `declarations.jsonl` with `retiredAt` / `retireReason`, so restoring it is one command instead of a snapshot rollback. `forget` is still the hard delete for "this never happened"; `retire` is "stop using this for now".
+- Panel: `置顶` badge on the row, per-row `置顶` / `先放下` buttons, `批量置顶` / `先放下` in the selection bar, and a `失效条目 · N 条` section under 数据 with `全部恢复`. Breadcrumb counts (`stats.pinned` / `stats.retired`) are in the profile payload.
+- MCP: `profile_retire` and `profile_pin` (14 tools now), so other hosts can pin and retire without the CLI.
+
+#### Changed
+- `profile edit` now prints a **before → after** line per changed field (内容 / 大类 / 键 / 权重 / 核心) instead of only the new value — otherwise there is no way to tell whether the edit landed the way you meant it.
+
+#### Fixed
+- `relevantOnly()` emitted **every section header twice**: once lazily when the first matching entry was kept, and once again on flush. Injected blocks therefore carried an empty duplicate such as a second `## 一、红线与硬要求`. The header is now written once per section, and only when that section actually has a surviving entry.
+
 ### v29 — a cover card opens the film (85.3s)
 
 #### Added

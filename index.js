@@ -588,6 +588,42 @@ const ACTION_ROUTE = '/user-profile/action'
       if (input.pending === true) args.push('--pending')
       return runCli(args)
     },
+    /** 软失效：条目退出画像但记录留着（面板「删除」旁边那个「先放下」）。 */
+    retire(input) {
+      const args = ['retire']
+      if (input.all === true) args.push('--all')
+      else if (typeof input.id === 'string' && input.id.length > 0) args.push('--id', input.id)
+      else if (typeof input.key === 'string' && input.key.length > 0) args.push('--key', input.key)
+      else if (typeof input.dim === 'string' && input.dim.length > 0) args.push('--dim', input.dim)
+      else return { ok: false, error: '缺少 id / key / dim / all' }
+      if (typeof input.reason === 'string' && input.reason.trim().length > 0) args.push('--reason', input.reason.trim())
+      return runCli(args)
+    },
+    unretire(input) {
+      const args = ['unretire']
+      if (input.all === true) args.push('--all')
+      else if (typeof input.id === 'string' && input.id.length > 0) args.push('--id', input.id)
+      else if (typeof input.key === 'string' && input.key.length > 0) args.push('--key', input.key)
+      else return { ok: false, error: '缺少 id / key / all' }
+      return runCli(args)
+    },
+    /** 置顶：每轮注入必带，不受相关性闸门影响。 */
+    pin(input) {
+      const args = ['pin']
+      if (input.all === true) args.push('--all')
+      else if (typeof input.id === 'string' && input.id.length > 0) args.push('--id', input.id)
+      else if (typeof input.key === 'string' && input.key.length > 0) args.push('--key', input.key)
+      else return { ok: false, error: '缺少 id / key / all' }
+      return runCli(args)
+    },
+    unpin(input) {
+      const args = ['unpin']
+      if (input.all === true) args.push('--all')
+      else if (typeof input.id === 'string' && input.id.length > 0) args.push('--id', input.id)
+      else if (typeof input.key === 'string' && input.key.length > 0) args.push('--key', input.key)
+      else return { ok: false, error: '缺少 id / key / all' }
+      return runCli(args)
+    },
     edit(input) {
       if (typeof input.id !== 'string' || input.id.length === 0) return { ok: false, error: '缺少 id' }
       const args = ['edit', '--id', input.id]

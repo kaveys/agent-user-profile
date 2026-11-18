@@ -486,6 +486,42 @@ const forgetOut = run('forget', '--id', victim)
 check('forget 自己会重建画像（不靠外部 build）', itemsNow() === itemsBefore - 1, `${itemsBefore} → ${itemsNow()}`)
 check('forget 的回执说「画像已刷新」', forgetOut.includes('画像已刷新'), forgetOut.split('\n')[0])
 
+// 19b 置顶（pin）/ 软失效（retire）/ 改完给新旧对照
+{
+  const allItems = (profileJson) => Object.values(profileJson.dimensions).flatMap((s) => s.items)
+  const target = allItems(JSON.parse(readFileSync(join(HOME, 'profile.json'), 'utf8')))
+    .find((item) => item.kind === 'declared')
+  check('前置：画像里有一条已确认条目', target !== undefined)
+
+  const pinOut = run('pin', '--id', target.id)
+  check('pin 回执说明每轮都带上', pinOut.includes('每轮都会带上'), pinOut.split('\n')[0].slice(0, 24))
+  const pinnedMd = readFileSync(join(HOME, 'inject.md'), 'utf8')
+  check('pin：注入里有「钉住」段', pinnedMd.includes('## 零、钉住'), pinnedMd.split('\n')[0])
+  const pinnedBlock = (pinnedMd.split('## 零、钉住')[1] ?? '').split('##')[0]
+  check('pin：条目落在钉住段内', pinnedBlock.includes(target.text.slice(0, 8)), pinnedBlock.trim().slice(0, 40))
+
+  // 相关性闸门：置顶条目在无关提问下也必须保留，且分段标题不能重复输出
+  const { relevantOnly } = await import('../lib/relevance.mjs')
+  const gated = relevantOnly(pinnedMd, '今天天气怎么样')
+  check('pin：无关提问下仍带上置顶条目', gated.text.includes(target.text.slice(0, 8)))
+  check('闸门不再重复输出分段标题', (gated.text.match(/## 零、钉住/g) ?? []).length === 1, String((gated.text.match(/## 零、钉住/g) ?? []).length))
+
+  const retireOut = run('retire', '--id', target.id, '--reason', '先不放进画像')
+  check('retire 回执给出恢复办法', retireOut.includes('unretire'), retireOut.split('\n')[0].slice(0, 30))
+  const afterRetire = allItems(JSON.parse(readFileSync(join(HOME, 'profile.json'), 'utf8')))
+  check('retire：条目退出画像', afterRetire.every((item) => item.id !== target.id))
+  const declText = readFileSync(join(HOME, 'declarations.jsonl'), 'utf8')
+  check('retire：记录仍留在 declarations.jsonl', declText.includes(target.id) && declText.includes('retiredAt'))
+
+  const backOut = run('unretire', '--id', target.id)
+  check('unretire：条目回到画像', allItems(JSON.parse(readFileSync(join(HOME, 'profile.json'), 'utf8'))).some((item) => item.id === target.id), backOut.split('\n')[0])
+
+  const editOut = run('edit', '--id', target.id, '--weight', '0.55')
+  check('edit 输出新旧对照（含 →）', editOut.includes('→'), editOut.split('\n').slice(0, 3).join(' / '))
+  run('unpin', '--id', target.id)
+  check('unpin：钉住段消失', readFileSync(join(HOME, 'inject.md'), 'utf8').includes('## 零、钉住') === false)
+}
+
 // 20 语义合并：字面不像、意思相同的两条，交给模型判后自动并
 // 放在最后跑 —— 它会改写条目集合，别影响前面那些按 id/条数断言的用例。
 {

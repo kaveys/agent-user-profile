@@ -469,7 +469,7 @@ window.__ModuleLoader__.load({
 
       return h('div', { style: styles.wrap },
         h('div', { style: styles.metrics },
-          h(Metric, { label: '画像条目', value: String(stats.items ?? 0), hint: merged > 0 ? `${merged} 条判为同义 · 已合并` : `其中核心 ${stats.core ?? 0} 条`, tone: 'brand' }),
+          h(Metric, { label: '画像条目', value: String(stats.items ?? 0), hint: (stats.pinned ?? 0) > 0 ? `置顶 ${stats.pinned} 条 · 核心 ${stats.core ?? 0} 条` : (merged > 0 ? `${merged} 条判为同义 · 已合并` : `其中核心 ${stats.core ?? 0} 条`), tone: 'brand' }),
           h(Metric, { label: '你确认过的', value: String(stats.declared ?? 0), hint: stats.modelFacts ? `含模型提炼 ${stats.modelFacts} 条` : '全部由你确认' }),
           h(Metric, { label: '待你确认', value: String(stats.pending ?? 0), hint: (stats.pending ?? 0) > 0 ? '在「待审」里过一遍' : '没有新候选', tone: (stats.pending ?? 0) > 0 ? 'warn' : undefined }),
           h(Metric, { label: '上次更新', value: relTime(data.profile?.builtAt), hint: data.profile?.builtAt === null ? '还没有生成过' : undefined }),
@@ -641,6 +641,26 @@ window.__ModuleLoader__.load({
               setPicked({})
             },
           }, '设为核心'),
+          h('button', {
+            style: styles.button,
+            disabled: busy,
+            title: '从画像里拿掉，但记录留着（随时能恢复）',
+            onClick: async () => {
+              const total = pickedIds.length
+              for (const id of pickedIds) await run({ action: 'retire', id }, { silent: true })
+              setPicked({})
+              if (typeof notify === 'function') notify(`已把 ${total} 条先放下（记录留着，随时可恢复）`)
+            },
+          }, '先放下'),
+          h('button', {
+            style: styles.button,
+            disabled: busy,
+            title: '每轮对话都带上这几条',
+            onClick: async () => {
+              for (const id of pickedIds) await run({ action: 'pin', id }, { silent: true })
+              setPicked({})
+            },
+          }, '批量置顶'),
           // 删除不可逆：先变成「确认删除 N 条」，5 秒内再点一次才真的执行。
           h('button', {
             style: { ...styles.button, ...styles.buttonDanger, ...(bulkArmed ? { background: T.layer2, fontWeight: 600 } : {}) },
@@ -676,7 +696,7 @@ window.__ModuleLoader__.load({
               h('th', { style: { ...styles.th, width: '84px' } }, '维度'),
               h('th', { style: styles.th }, '内容 / 标记'),
               h('th', { style: { ...styles.thRight, width: '72px' } }, '权重'),
-              h('th', { style: { ...styles.thRight, width: '138px' } }, '操作'))),
+              h('th', { style: { ...styles.thRight, width: '232px' } }, '操作'))),
             h('tbody', null, shown.map((item) => editing === item.id
               ? h(ItemEditor, {
                 key: item.id,
@@ -697,6 +717,7 @@ window.__ModuleLoader__.load({
                   item.scope !== undefined && item.scope !== 'global' ? h(Badge, { text: `作用域 ${item.scopeId ?? item.scope}` }) : null),
                 h('td', { style: styles.td },
                   h('span', { title: excerptOf(item) }, item.text),
+                  item.pinned ? h(Badge, { text: '置顶', tone: 'core' }) : null,
                   item.core ? h(Badge, { text: '核心', tone: 'core' }) : null,
                   item.frozen ? h(Badge, { text: '未决·冻结', tone: 'warn' }) : null,
                   item.kind === 'declared' ? h(Badge, { text: '已确认' }) : h(Badge, { text: '我的观察' }),
@@ -719,13 +740,23 @@ window.__ModuleLoader__.load({
                   h('div', { style: { marginTop: '4px', minWidth: '56px' } }, h(Bar, { ratio: Number(item.weight ?? 0) }))),
                 h('td', { style: styles.tdRight },
                   item.kind === 'declared'
-                    ? h('span', { style: { ...styles.formRow, flexWrap: 'nowrap', justifyContent: 'flex-end' } },
+                    ? h('span', { style: { ...styles.formRow, flexWrap: 'wrap', justifyContent: 'flex-end' } },
                       h('button', { style: { ...styles.button, ...styles.buttonMini }, disabled: busy, onClick: () => setEditing(item.id) }, '编辑'),
+                      h('button', { style: { ...styles.button, ...styles.buttonMini }, disabled: busy, onClick: () => run({ action: 'edit', id: item.id, core: !item.core }) }, item.core ? '取消核心' : '设核心'),
+                      // 置顶：每轮都会带上（不受相关性筛选影响）。和「核心」的区别是核心管优先级，置顶管「一定会出现」。
+                      h('button', {
+                        style: item.pinned ? { ...styles.button, ...styles.buttonMini, ...styles.buttonPrimary } : { ...styles.button, ...styles.buttonMini },
+                        disabled: busy,
+                        title: item.pinned ? '取消置顶' : '每轮都带上这条',
+                        onClick: () => run({ action: item.pinned ? 'unpin' : 'pin', id: item.id }),
+                      }, item.pinned ? '已置顶' : '置顶'),
+                      // 「先放下」（retire）可恢复：删了要找回来得翻快照，放下只点一下就能恢复。
                       h('button', {
                         style: { ...styles.button, ...styles.buttonMini },
                         disabled: busy,
-                        onClick: () => run({ action: 'edit', id: item.id, core: !item.core }),
-                      }, item.core ? '取消核心' : '设核心'),
+                        title: '从画像里拿掉，但记录留着，随时能恢复',
+                        onClick: () => run({ action: 'retire', id: item.id }),
+                      }, '先放下'),
                       h('button', {
                         style: dangerouslyArmed(item.id) ? { ...styles.button, ...styles.buttonMini, ...styles.buttonDanger } : { ...styles.button, ...styles.buttonMini },
                         disabled: busy,
@@ -1120,6 +1151,10 @@ window.__ModuleLoader__.load({
               },
             }, '导入'),
             h('span', { style: styles.note }, '导入的条目与手动记录等价，可直接编辑与删除。'))),
+        (data.stats?.retired ?? 0) > 0 ? h(Section, { title: `失效条目 · ${data.stats.retired} 条`, extra: h('span', { style: styles.note }, '「先放下」的条目：不在画像里，记录与来源都还在') },
+          h('div', { style: styles.formRow },
+            h(Btn, { disabled: busy, onClick: () => run({ action: 'unretire', all: true }) }, '全部恢复'),
+            h('span', { style: styles.note }, '恢复后立即重新进入画像；也可以在条目页逐条恢复。'))) : null,
         h(Section, { title: '重置', extra: h('span', { style: styles.note }, '归档到 archive/<时间戳> 后清空，可手工恢复') },
           h('div', { style: styles.dangerZone },
             h('div', { style: styles.formRow },

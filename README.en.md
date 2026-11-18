@@ -77,6 +77,10 @@ A standard MCP server — any MCP client can read the same profile.
 
 **Can I undo a deletion?** Yes — a snapshot is taken before every destructive action (last 20 kept), restorable from the panel.
 
+**What if there is something it should know every single time?** **Pin** that entry. Pinned entries sit at the top of the injected block and skip the relevance filter — they are carried even into a turn about an unrelated compiler error. Pin from the row in the panel, or `profile pin --key <key>`.
+
+**What if I want an entry to stop counting, without losing it?** Use **retire** (`profile retire`). The entry leaves the portrait and the prompt, but the record, its weight and its provenance stay in `declarations.jsonl`, so `profile unretire` restores it in one command. Retire means "not in play"; delete means "gone". Retired entries can be restored in bulk from the Data tab.
+
 **How big is it?** Tens of KB. No images, no chat logs.
 
 **Do I need DeepSeek Harness?** No. The data layer is a standalone CLI, and the MCP server runs on its own.

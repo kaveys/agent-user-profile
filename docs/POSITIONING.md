@@ -43,6 +43,8 @@
 | [dsh-memory-core](https://github.com/AstroLiao/dsh-memory-core) | 纯 Markdown 记忆 + `systemPrompt` 注入 | 覆盖式写入、无冲突概念；本项目有权重、冲突三态（merged / resolved / frozen）、快照回滚 |
 | [claude-mem](https://github.com/thedotmack/claude-mem) | Claude Code 全生命周期钩子 + AI 压缩观察 | 记录面很宽；本项目只保留能改变"下次做法"的结论 |
 | [mem0](https://github.com/mem0ai/mem0) / [getprofile](https://github.com/getprofile/getprofile) | 通用记忆服务 / drop-in LLM proxy | 服务化、要部署；本项目是**文件 + 一个 CLI**，可以整目录拷走 |
+| [dsh-user-portrait](https://github.com/qazsedcftg/dsh-user-portrait) | 九维度画像 + 证据账本（每条结论带置信度与来源会话）、我的备注优先、删除分两级 | 它的画像是「按需取用」：默认不注入，要开会话开关。本项目相反，默认每轮叠加。**已借鉴**：删除分两级的思路 → 本项目的「先放下」（`retire`），记录留在 `declarations.jsonl` 里可恢复 |
+| [dsh-tool-user-memory](https://github.com/IAMLieutenant/dsh-tool-user-memory) | 置顶偏好、软失效、替换时显示新旧对照、回答下方即时撤销 | **已借鉴**：置顶成为独立注入段位（每轮必带、豁免相关性闸门），`edit` 输出逐项新旧对照。差别在形态：它是模型工具 + 交互按钮，本项目是面板 + CLI + MCP 三条路共用同一份存储 |
 
 差异化的三句话（放 README 首屏就够）：
 
