@@ -5,6 +5,22 @@ The portrait schema version is tracked separately and lives in `config.json`.
 
 ## Unreleased
 
+### v36 — state survives merging, decay and revoke
+
+Six defects found by re-reading v35 with two independent passes (diff review, then CLI and MCP probes). Every one of them exited 0 and looked fine on the panel; what they broke was the state you had already set.
+
+#### Fixed
+
+- **Pinned and core items were decayed anyway** — `decayOf()` only exempted them from `stale`, so a 400-day-old core item still slid from 1.0 to the floor and could be outranked by a fresh 0.6 guess in `wise` arbitration. Pinned and core items now skip decay completely, weight included.
+- **`forget` combined selectors were a union, not an intersection** — `forget --session X --dim taste` deleted every taste entry from every session (4 rows down to 1 in the probe). Selectors now intersect: a row goes only if it matches all of them.
+- **Re-declaring the same fact dropped its deadline** — `--ttl` never reached an existing row, and an older `expiresAt` was wiped by the update. The date is carried over unless you pass a new one.
+- **Synonym merges dropped the deadline** — the same bug on the write-path merge branch; the merged row now keeps the incoming `expiresAt`.
+- **MCP `profile_declare` could not set a deadline** — `ttl` / `expires` were missing from the schema and the handler, so any other host was locked out of the lifecycle feature entirely.
+- **MCP `profile_forget` could not revoke by evidence** — the handler used an `else if` chain over id/key/dim, so `session` / `turn` / `expired` / `ids` were unreachable and conditions could not be combined. All conditions are now independent flags.
+
+#### Added
+
+- `tests/audit-13.mjs` — 11 checks (decay exemption for pinned and core, selector intersection, expiry surviving re-declare and merge, MCP `declare --ttl`, MCP `forget --session`), wired into CI.
 ### v35 — a memory that ages: expiry, confidence-first conflicts, decay, revoke by evidence
 
 Four lifecycle rules that every "memory system" paper describes and a flat JSON store usually forgets. All four are switches: turn them off and the old behaviour comes back unchanged.

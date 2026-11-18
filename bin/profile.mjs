@@ -857,6 +857,9 @@ function isExpired(record, nowMs = Date.now()) {
 function decayOf(item, config, nowMs = Date.now()) {
   const decay = config?.decay
   if (decay?.enabled === false) return null
+  // 核心与置顶是「你亲口定下、永远算数」的条目：README 写着「永不淡化」，
+  // 那就连权重也不许动 —— 只降 stale 而偷偷减权，会让它在 wise 冲突裁决里被一条新来的 0.6 顶掉。
+  if (item?.core === true || item?.pinned === true) return null
   const afterDays = Number(decay?.afterDays) > 0 ? Number(decay.afterDays) : 90
   const step = Number.isFinite(Number(decay?.step)) ? Number(decay.step) : 0.2
   const floor = Number.isFinite(Number(decay?.floor)) ? Number(decay.floor) : 0.35
@@ -944,7 +947,16 @@ function cmdDeclare({ flags }) {
   ))
   if (existing !== undefined) {
     const rows = readJsonl(targetFile).map((row) => (row === existing || row?.id === existing.id
-      ? { ...row, at: record.at, editedAt: record.at, confidence: record.confidence, core: row.core === true || record.core, provenance: record.provenance }
+      ? {
+        ...row,
+        at: record.at,
+        editedAt: record.at,
+        confidence: record.confidence,
+        core: row.core === true || record.core,
+        provenance: record.provenance,
+        // 再说一遍时可以借机改保质期；没给 --ttl/--expires 就保留原来的（不能因为重复一句就把过期时间抹掉）
+        expiresAt: record.expiresAt ?? row.expiresAt,
+      }
       : row))
     writeJsonl(targetFile, rows)
     if (flags.pending !== true) rebuildQuietly()
@@ -994,11 +1006,14 @@ function cmdDeclare({ flags }) {
         core: twin.core === true || record.core === true,
         // 新声明这一侧也可能是置顶进来的：状态取并集，别让合并把置顶吃掉。
         pinnedAt: twin.pinnedAt ?? record.pinnedAt,
+        // 合并时保质期取「更晚到期的那个」：新说的这句若带了 --ttl，不能因为并进老条目就丢掉
+        expiresAt: record.expiresAt ?? twin.expiresAt,
         at: record.at,
         editedAt: record.at,
         mergedFrom: [...(twin.mergedFrom ?? []), { id: record.id, dim: record.dim, fact: record.fact, at: record.at }],
       }
       if (kept.pinnedAt === undefined) delete kept.pinnedAt
+      if (kept.expiresAt === undefined) delete kept.expiresAt
       if (kept.core !== true) delete kept.core
       writeJsonl(targetFile, rows.map((row) => (row.id === twin.id ? kept : row)))
       if (flags.pending !== true) rebuildQuietly()
@@ -2364,24 +2379,25 @@ function cmdForget({ flags }) {
   // 到期清理：临时状态过了保质期，一条命令归档掉
   const expiredMode = flags.expired === true
 
-  if (!all && !expiredMode && id === '' && key === '' && dim === '' && ids.length === 0 && session === '' && turn === null) {
+  // 多个选取器同时给出时取**交集**：`forget --session sess-a --dim taste`
+  // 应当是「甲会话里关于 taste 的结论」，而不是「甲会话 + 整个 taste 维度」。
+  // （旧实现是并集，实测把别的会话的条目一起删了 —— 探针 P2 复现。）
+  const selectors = []
+  if (ids.length > 0) selectors.push((r) => ids.includes(r.id))
+  if (id !== '') selectors.push((r) => r.id === id)
+  if (key !== '') selectors.push((r) => r.key === key)
+  if (dim !== '') selectors.push((r) => r.dim === dim)
+  if (session !== '') selectors.push((r) => r.session === session || r.provenance?.session === session)
+  if (turn !== null) selectors.push((r) => r.provenance?.turn === turn)
+  if (expiredMode) selectors.push((r) => isExpired(r))
+
+  if (!all && selectors.length === 0) {
     die('用法：forget --id <id> | --ids <id,id,...> | --key <key> | --dim <维度> | --session <会话> | --turn <轮次> | --expired | --all [--pending]')
   }
 
   const file = inPending ? p('pending.jsonl') : p('declarations.jsonl')
   const records = readJsonl(file)
-  const hit = (r) => {
-    if (all) return true
-    if (expiredMode) return isExpired(r)
-    if (ids.length > 0 && ids.includes(r.id)) return true
-    if (id !== '' && r.id === id) return true
-    if (key !== '' && r.key === key) return true
-    if (session !== '' && (r.session === session || r.provenance?.session === session)) return true
-    if (turn !== null && (r.provenance?.turn === turn)) return true
-    // --dim 只在额外给了 --key 之外的显式意图时才按维度清空，避免手滑清掉一整维
-    if (dim !== '' && r.dim === dim) return true
-    return false
-  }
+  const hit = all ? () => true : (r) => selectors.every((match) => match(r))
   const kept = records.filter((r) => !hit(r))
   const removed = records.length - kept.length
   if (removed === 0) die('没有匹配的记录（什么都没删）')

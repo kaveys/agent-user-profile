@@ -26,7 +26,7 @@ import { createInterface } from 'node:readline'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CLI = join(HERE, '..', 'bin', 'profile.mjs')
 const HOME = process.env.DSH_USER_PROFILE_HOME || join(homedir(), '.dsh', 'user-profile')
-const SERVER_INFO = { name: 'agent-user-profile', version: '0.5.0' }
+const SERVER_INFO = { name: 'agent-user-profile', version: '0.5.1' }
 const PROTOCOL_FALLBACK = '2024-11-05'
 
 const log = (message) => process.stderr.write(`[user-profile-mcp] ${message}\n`)
@@ -90,6 +90,8 @@ const TOOLS = [
         confidence: { type: 'number', description: '0..1：用户明说 0.9、反复出现 0.6、只出现一次 0.45' },
         core: { type: 'boolean', description: '是否红线（必进注入块）' },
         pending: { type: 'boolean', description: '只进待审候选，不直接入画像' },
+        ttl: { type: 'string', description: '保质期，例如 7d / 30d（临时目标用它，到期自动退出画像，记录仍留着）' },
+        expires: { type: 'string', description: '到期日，例如 2026-12-31（与 ttl 二选一）' },
       },
       required: ['dim', 'fact'],
     },
@@ -102,7 +104,11 @@ const TOOLS = [
       properties: {
         id: { type: 'string', description: '条目 id（profile_search 或面板可见）' },
         key: { type: 'string', description: '按 key 删' },
-        dim: { type: 'string', description: '按大类删' },
+        dim: { type: 'string', description: '按大类删（与 id/key/session/turn 同时给时取交集）' },
+        ids: { type: 'string', description: '逗号分隔的多个 id，一次删完（只留一份快照）' },
+        session: { type: 'string', description: '撤掉某次会话带来的全部结论（按证据撤销）' },
+        turn: { type: 'number', description: '撤掉某一轮带来的结论' },
+        expired: { type: 'boolean', description: '清掉所有已过保质期的记录' },
         all: { type: 'boolean', description: '清空所有条目' },
       },
     },
@@ -260,6 +266,8 @@ function callTool(name, args = {}) {
     if (Number.isFinite(Number(args.confidence))) flags.push('--confidence', String(Number(args.confidence)))
     if (args.core === true) flags.push('--core')
     if (args.pending === true) flags.push('--pending')
+    if (args.ttl) flags.push('--ttl', String(args.ttl))
+    if (args.expires) flags.push('--expires', String(args.expires))
     flags.push('--source', 'model')
     const result = runCli(flags)
     return result.ok ? okText(result.text) : errText(result.text)
@@ -267,11 +275,16 @@ function callTool(name, args = {}) {
 
   if (name === 'profile_forget') {
     const flags = ['forget']
-    if (args.all === true) flags.push('--all')
-    else if (args.id) flags.push('--id', String(args.id))
-    else if (args.key) flags.push('--key', String(args.key))
-    else if (args.dim) flags.push('--dim', String(args.dim))
-    else return errText('至少给一个条件：id / key / dim / all')
+    let given = false
+    if (args.all === true) { flags.push('--all'); given = true }
+    if (args.id) { flags.push('--id', String(args.id)); given = true }
+    if (args.ids) { flags.push('--ids', String(args.ids)); given = true }
+    if (args.key) { flags.push('--key', String(args.key)); given = true }
+    if (args.dim) { flags.push('--dim', String(args.dim)); given = true }
+    if (args.session) { flags.push('--session', String(args.session)); given = true }
+    if (Number.isFinite(Number(args.turn)) && args.turn !== undefined) { flags.push('--turn', String(Number(args.turn))); given = true }
+    if (args.expired === true) { flags.push('--expired'); given = true }
+    if (!given) return errText('至少给一个条件：id / ids / key / dim / session / turn / expired / all')
     const result = runCli(flags)
     return result.ok ? okText(result.text) : errText(result.text)
   }

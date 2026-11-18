@@ -48,6 +48,7 @@ jobs:
           node --check tests/audit-10.mjs
           node --check tests/audit-11.mjs
         node --check tests/audit-12.mjs
+        node --check tests/audit-13.mjs
 
       - name: Unit tests (storage / conflicts / injection)
         run: node tests/selftest.mjs
@@ -87,6 +88,9 @@ jobs:
 
       - name: Audit 12 — lifecycle (ttl, confidence, decay, revoke by evidence)
         run: node tests/audit-12.mjs
+
+      - name: Audit 13 — state survives merging, decay and revoke
+        run: node tests/audit-13.mjs
 
       - name: Degraded host matrix
         run: node tests/compat.mjs
