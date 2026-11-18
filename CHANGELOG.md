@@ -5,12 +5,12 @@ The portrait schema version is tracked separately and lives in `config.json`.
 
 ## Unreleased
 
-### v28 — sharper hook, a comparison scene, faster speech (72.2s)
+### v28 — sharper hook, a comparison scene, natural pace (82.2s)
 
 #### Changed
 - **Opening rewritten to hold attention**:「它读过整个互联网，却记不住你昨天说的一句话」at 70 px, with「换个对话，你又成了陌生人」as the third beat. The old opening described the problem; this one states the paradox, which is what makes someone keep watching.
 - **New scene「和别的记忆插件，差在哪」** (nine scenes now): a two-column comparison — 别的记忆插件 `存聊天记录，用的时候翻出来 / 记你说过什么 / 删了就没了` versus 这个 `整理成一张清单，开口前先读 / 还记你是什么样的人 / 能改能删，删错能还原`. One claim per row, no feature lists.
-- **Speech 27 % faster**: `-Tempo 1.15` (was 0.9). Measured 4.05–4.81 字/秒 → **5.1–6.1 字/秒**, closer to how a person narrates a short video.
+- **Pace now sits at natural speech**: `-Tempo 1.0`, i.e. **5.1 字/秒** measured over the whole script (the 0.9 build ran 4.05–4.81 字/秒 and felt slow; 1.15 reached 5.9 字/秒 and read as rushed). Nine scenes, **82.2 s**.
 - `01-hook` subtitle no longer repeats the headline（它记得全世界…）— it now closes the thought: 「不是它笨，是它不认识你」.
 
 #### Fixed

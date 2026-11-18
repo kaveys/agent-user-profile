@@ -11,7 +11,7 @@ param(
   [string]$Voice   = '',
   [string]$Speed   = '0.92',
   [string]$Seed    = '3',
-  [string]$Tempo   = '1.15',
+  [string]$Tempo   = '1.0',
   [switch]$NoTtsRefresh
 )
 
