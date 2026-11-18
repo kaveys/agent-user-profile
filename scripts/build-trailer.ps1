@@ -299,6 +299,39 @@ $Scenes = @(
     }
   },
   @{
+    Name = '05c-keep'
+    Narration   = '有些事，你希望它每次都别忘了，点一下置顶，每一轮都带上。有些事只是暂时不用，就先放下，记录还在，随时能拿回来。'
+    Subtitle    = '要每次记住 → 置顶 · 暂时不用 → 先放下'
+    Draw = {
+      param($g)
+      Txt $g '留下你真正在意的' 80 62 52 $C.text $true 620
+      Txt $g '重要的钉住，不用的先收起来' 80 132 27 $C.dim $false 720
+
+      RoundRect $g 80 190 540 290 22 $C.card $C.line 2
+      Txt $g '每次都要记住的' 108 208 26 $C.dim $false 440
+      RoundRect $g 108 252 484 60 12 $C.card2
+      $chipPin = [Drawing.Color]::FromArgb(46, $C.accent)
+      RoundRect $g 124 264 76 34 10 $chipPin
+      Txt $g '置顶' 140 270 20 $C.accent $true 60
+      Txt $g '对外发布前必须脱敏' 216 268 25 $C.text $false 360
+      Txt $g '不管这轮问什么，都先看到这一条' 108 332 22 $C.ok $false 470
+      RoundRect $g 108 372 484 60 12 $C.card2 $C.line 1
+      Txt $g '核心 = 更重要 · 置顶 = 每轮必带' 128 386 22 $C.faint $false 460
+
+      RoundRect $g 660 190 540 290 22 $C.card $C.line 2
+      Txt $g '暂时不想让它用' 688 208 26 $C.dim $false 440
+      RoundRect $g 688 252 484 60 12 $C.card2
+      Txt $g '喜欢用表情包回消息' 708 266 25 $C.faint $false 330
+      RoundRect $g 1046 262 108 36 10 $C.card2 $C.line 1
+      Txt $g '先放下' 1064 270 19 $C.dim $false 80
+      Txt $g '不删，只是这轮不带上；随时拿回来' 688 332 22 $C.ok $false 470
+      RoundRect $g 688 372 484 60 12 $C.card2 $C.line 1
+      Txt $g '和删除的区别：记录一直留着' 708 386 22 $C.faint $false 440
+
+      TxtCenter $g '拿不准要不要留？先放下，比删掉安全' 520 24 $C.dim
+    }
+  },
+  @{
     Name = '05b-tidy'
     Narration = '记得多了，它自己也会整理。同一件事记了两遍，合成一条。哪天你换个 AI 用，也能把这些整段搬过去。'
     Subtitle  = '重复的自动合并 · 换工具也能带走'
@@ -442,7 +475,22 @@ foreach ($scene in $Scenes) {
     if (-not (Test-Path $wav)) {
       Set-Content $txt $scene.Narration -Encoding UTF8
       if ($useChat) {
-        & $ChatPy $ttsPy $txt $wav chattts $Voice $Seed
+        # ChatTTS 每次生成的停顿长短不稳定：同一段文案可能读 9 秒，也可能拖到 18 秒。
+        # 采最多 3 次，取语速最接近 5.2 字/秒的一版，避免某一场莫名变成两倍长。
+        $spoken = ($scene.Narration -replace '[，。！？、：；,.!?\s]', '').Length
+        $take = Join-Path $Work ("{0}.take.wav" -f $scene.Name)
+        $bestGap = [double]::MaxValue
+        for ($attempt = 0; $attempt -lt 3; $attempt++) {
+          & $ChatPy $ttsPy $txt $take chattts $Voice $Seed
+          if (-not (Test-Path $take)) { continue }
+          $takeDur = [double](& $Ffprobe -v error -show_entries format=duration -of csv=p=0 $take)
+          if ($takeDur -le 0) { continue }
+          $rate = $spoken / $takeDur
+          Write-Host ("    [take {0}] {1:N1}s · {2:N2} 字/秒" -f ($attempt + 1), $takeDur, $rate)
+          if ([Math]::Abs($rate - 5.2) -lt $bestGap) { $bestGap = [Math]::Abs($rate - 5.2); Copy-Item -Force $take $wav }
+          if ($rate -ge 4.6 -and $rate -le 5.9) { break }
+        }
+        if (Test-Path $take) { Remove-Item -Force $take }
       } elseif ($useKokoro) {
         & $Py $ttsPy $txt $wav kokoro $Voice $Speed
       } else {

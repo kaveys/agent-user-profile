@@ -5,6 +5,13 @@ The portrait schema version is tracked separately and lives in `config.json`.
 
 ## Unreleased
 
+### v32 — the film shows pin and retire (95.1 s)
+
+#### Changed
+- New scene **`05c-keep` 「留下你真正在意的」**, between 「你说了算」 and 「它会自己整理」: the left card shows a pinned entry (`置顶` badge, 「不管这轮问什么，都先看到这一条」) with the one distinction people get wrong — **核心 = 更重要 · 置顶 = 每轮必带**; the right card shows `先放下` (soft retire) with 「不删，只是这轮不带上；随时拿回来」 and 「和删除的区别：记录一直留着」. Ten → **eleven** scenes, 85.3 s → **95.1 s**.
+- **ChatTTS take selection.** The same script and the same seed can come out as 9 seconds or 18 seconds: pause length varies per generation (the 66-character first draft landed at 3.0 字/秒, the same text elsewhere measured 5.8). The build now synthesizes up to three takes and keeps the one whose pace is closest to **5.2 字/秒**, accepting anything in 4.6–5.9, then logs it as `[take N] Xs · Y 字/秒`. The scene's narration was also tightened from 66 to 55 characters.
+- `README.md` / `README.en.md` durations follow the film (95 秒 / 95-second).
+
 ### v31 — state fields survive merging, batches take one snapshot
 
 Every bug fixed here has the same shape: the command exits 0, the panel shows no error, and the only way to notice is to compare **what you just did** with **what the profile now contains**. `tests/audit-11.mjs` reproduces all eight as regression checks.
