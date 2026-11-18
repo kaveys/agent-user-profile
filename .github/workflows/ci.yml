@@ -46,6 +46,7 @@ jobs:
           node --check tests/audit-8.mjs
           node --check tests/audit-9.mjs
           node --check tests/audit-10.mjs
+          node --check tests/audit-11.mjs
 
       - name: Unit tests (storage / conflicts / injection)
         run: node tests/selftest.mjs
@@ -79,6 +80,9 @@ jobs:
 
       - name: Audit 10 — refactor equivalence and repo consistency
         run: node tests/audit-10.mjs
+
+      - name: Audit 11 — state fields survive merging
+        run: node tests/audit-11.mjs
 
       - name: Degraded host matrix
         run: node tests/compat.mjs

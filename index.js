@@ -591,37 +591,48 @@ const ACTION_ROUTE = '/user-profile/action'
     /** 软失效：条目退出画像但记录留着（面板「删除」旁边那个「先放下」）。 */
     retire(input) {
       const args = ['retire']
+      const ids = Array.isArray(input.ids) ? input.ids.join(',') : input.ids
       if (input.all === true) args.push('--all')
+      else if (typeof ids === 'string' && ids.length > 0) args.push('--ids', ids)
       else if (typeof input.id === 'string' && input.id.length > 0) args.push('--id', input.id)
       else if (typeof input.key === 'string' && input.key.length > 0) args.push('--key', input.key)
       else if (typeof input.dim === 'string' && input.dim.length > 0) args.push('--dim', input.dim)
-      else return { ok: false, error: '缺少 id / key / dim / all' }
+      else return { ok: false, error: '缺少 id / ids / key / dim / all' }
       if (typeof input.reason === 'string' && input.reason.trim().length > 0) args.push('--reason', input.reason.trim())
       return runCli(args)
     },
     unretire(input) {
       const args = ['unretire']
+      const ids = Array.isArray(input.ids) ? input.ids.join(',') : input.ids
       if (input.all === true) args.push('--all')
+      else if (typeof ids === 'string' && ids.length > 0) args.push('--ids', ids)
       else if (typeof input.id === 'string' && input.id.length > 0) args.push('--id', input.id)
       else if (typeof input.key === 'string' && input.key.length > 0) args.push('--key', input.key)
-      else return { ok: false, error: '缺少 id / key / all' }
+      else if (typeof input.dim === 'string' && input.dim.length > 0) args.push('--dim', input.dim)
+      else return { ok: false, error: '缺少 id / ids / key / dim / all' }
       return runCli(args)
     },
     /** 置顶：每轮注入必带，不受相关性闸门影响。 */
     pin(input) {
       const args = ['pin']
+      const ids = Array.isArray(input.ids) ? input.ids.join(',') : input.ids
       if (input.all === true) args.push('--all')
+      else if (typeof ids === 'string' && ids.length > 0) args.push('--ids', ids)
       else if (typeof input.id === 'string' && input.id.length > 0) args.push('--id', input.id)
       else if (typeof input.key === 'string' && input.key.length > 0) args.push('--key', input.key)
-      else return { ok: false, error: '缺少 id / key / all' }
+      else if (typeof input.dim === 'string' && input.dim.length > 0) args.push('--dim', input.dim)
+      else return { ok: false, error: '缺少 id / ids / key / dim / all' }
       return runCli(args)
     },
     unpin(input) {
       const args = ['unpin']
+      const ids = Array.isArray(input.ids) ? input.ids.join(',') : input.ids
       if (input.all === true) args.push('--all')
+      else if (typeof ids === 'string' && ids.length > 0) args.push('--ids', ids)
       else if (typeof input.id === 'string' && input.id.length > 0) args.push('--id', input.id)
       else if (typeof input.key === 'string' && input.key.length > 0) args.push('--key', input.key)
-      else return { ok: false, error: '缺少 id / key / all' }
+      else if (typeof input.dim === 'string' && input.dim.length > 0) args.push('--dim', input.dim)
+      else return { ok: false, error: '缺少 id / ids / key / dim / all' }
       return runCli(args)
     },
     edit(input) {

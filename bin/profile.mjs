@@ -893,9 +893,16 @@ function cmdDeclare({ flags }) {
       if (row === existing || typeof row?.fact !== 'string') return false
       if (row.id === record.id) return false
       if (flags.pending === true) return false
+      // 已被「先放下」的条目不再当合并目标：否则新说的这句话会并进一条不进画像的记录里，
+      // 结果是「我明明记了，画像里却没有」——比重复更难查。
+      if (row.retiredAt !== undefined) return false
       // 同一个 key 下的不同说法属于「同名覆盖」，由 conflicts/history 记痕迹，
       // 不能被相似合并悄悄吞掉（否则「偏好深色 → 偏好浅色」会变成一条，还看不出改过）。
       if (row.dim === record.dim && (row.key ?? '') === (record.key ?? '')) return false
+      // 两边都是用户显式指定的 key，说明「这是两件事」：显式身份优先于相似度。
+      if (typeof flags.key === 'string' && flags.key.length > 0 && typeof row.key === 'string' && row.key !== flags.key) {
+        return false
+      }
       const sameDim = row.dim === record.dim
       const limit = sameDim ? threshold : Math.max(0.8, threshold + 0.3)
       return mergeScore(row.fact, record.fact) >= limit
@@ -913,10 +920,14 @@ function cmdDeclare({ flags }) {
         fact: mergedFact,
         confidence: Math.max(Number(twin.confidence ?? 0), record.confidence),
         core: twin.core === true || record.core === true,
+        // 新声明这一侧也可能是置顶进来的：状态取并集，别让合并把置顶吃掉。
+        pinnedAt: twin.pinnedAt ?? record.pinnedAt,
         at: record.at,
         editedAt: record.at,
         mergedFrom: [...(twin.mergedFrom ?? []), { id: record.id, dim: record.dim, fact: record.fact, at: record.at }],
       }
+      if (kept.pinnedAt === undefined) delete kept.pinnedAt
+      if (kept.core !== true) delete kept.core
       writeJsonl(targetFile, rows.map((row) => (row.id === twin.id ? kept : row)))
       if (flags.pending !== true) rebuildQuietly()
       process.stdout.write(`已合并到已有条目 [${kept.dim}] ${kept.fact}\n（原句「${record.fact}」记进 mergedFrom；同义判定 ${mergeScore(twin.fact, record.fact).toFixed(2)}）${clampNote}${redactNote}\n${flags.pending === true ? '' : '（画像已刷新）\n'}`)
@@ -1278,63 +1289,6 @@ function aggregateObserved(records, config) {
   return { items: withItems ? items : [], turns, steps, ok, fail, totalToolCalls }
 }
 
-/**
- * 主动合并相似条目：同一大类内按 mergeScore 判定，跨大类只在字面几乎相同（≥0.8）时合并，
- * 避免把「习惯」和「口味」里措辞相近但含义不同的两条搅在一起。
- * 被并入的那条进 history（mergedAs='duplicate'），不删原文，可追溯。
- */
-function findMergeGroups(items, config) {
-  const configuredThreshold = Number(config.build?.similarityThreshold)
-  const threshold = Number.isFinite(configuredThreshold) && configuredThreshold > 0 && configuredThreshold <= 1
-    ? configuredThreshold
-    : 0.35
-  const crossThreshold = Math.max(0.8, threshold + 0.3)
-  const groups = []
-  const taken = new Set()
-  const sorted = [...items].sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
-  for (const base of sorted) {
-    if (taken.has(base.id)) continue
-    const members = [base]
-    for (const other of sorted) {
-      if (other === base || taken.has(other.id)) continue
-      const sameDim = other.dim === base.dim
-      const score = mergeScore(base.text, other.text)
-      const limit = sameDim ? threshold : crossThreshold
-      if (score >= limit) {
-        members.push(other)
-        taken.add(other.id)
-      }
-    }
-    if (members.length > 1) {
-      taken.add(base.id)
-      groups.push({ base, members, score: mergeScore(base.text, members[1].text) })
-    }
-  }
-  return groups
-}
-
-/** 把同组条目合成一条：保留信息量最大的原文，权重取最高，历史逐条留档。 */
-function mergeGroupRecords(group) {
-  const byLength = [...group.members].sort((a, b) => String(b.fact ?? '').length - String(a.fact ?? '').length)
-  const winnerRecord = [...group.members].sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0))[0]
-  const longest = byLength[0]
-  // 若一条几乎被另一条完全包含，用长的那条当正文（信息更全），权重仍取最高
-  const keepText = coverage(winnerRecord.fact, longest.fact) >= 0.92 ? longest.fact : winnerRecord.fact
-  const kept = {
-    ...winnerRecord,
-    fact: keepText,
-    confidence: Math.max(...group.members.map((m) => Number(m.confidence ?? 0))),
-    core: group.members.some((m) => m.core === true) ? true : winnerRecord.core,
-    at: new Date().toISOString(),
-    editedAt: new Date().toISOString(),
-    mergedFrom: [
-      ...(winnerRecord.mergedFrom ?? []),
-      ...group.members.filter((m) => m !== winnerRecord).map((m) => ({ id: m.id, dim: m.dim, fact: m.fact })),
-    ],
-  }
-  return kept
-}
-
 function buildDimensions(declarations, observed, config) {
   const dimensions = {}
   for (const dim of config.dimensions) {
@@ -1385,7 +1339,20 @@ function buildDimensions(declarations, observed, config) {
       lastSeen: record.at,
       ...extra,
     })
-    target.items.push(shape(latest, { firstSeen: list[0].at, lastSeen: latest.at, evidence: list.map((r) => r.id).filter(Boolean) }))
+    // 状态字段（置顶 / 核心）取整组的并集，而不是只看「最新那条」：
+    // 用户钉住的是「这件事」，不是「这条记录的某个时间戳版本」。
+    // 只看 latest 会有一个很难发现的事故——先置顶，之后同 key 又来一条更新的（自动提炼或二次声明），
+    // 置顶就静默消失，而面板上看起来什么都没发生。
+    const anyPinnedAt = [...list].reverse().find((r) => r.pinnedAt !== undefined)?.pinnedAt
+    const anyCore = list.some((r) => r.core === true)
+    target.items.push(shape(latest, {
+      firstSeen: list[0].at,
+      lastSeen: latest.at,
+      evidence: list.map((r) => r.id).filter(Boolean),
+      core: anyCore,
+      pinned: anyPinnedAt === undefined ? undefined : true,
+      pinnedAt: anyPinnedAt,
+    }))
 
     const previous = list[list.length - 2]
     if (previous !== undefined && previous.fact !== latest.fact) {
@@ -1629,29 +1596,33 @@ function renderInject(profile, config) {
    * 现在三段共用一个绝对预算，先写的先占：红线永远优先，个性化次之，背景参考最后。
    * limit === 0 时不裁任何东西。
    */
-  const pushSection = (title, items, noteWhenCut) => {
+  // mandatory：红线与置顶这两段不许被预算裁掉 —— 它们存在的理由就是「无论如何都要出现」。
+  // 另外：一条都没放下时不再写标题（预算紧张时会留下只有标题的空段，读起来像画像坏了）。
+  const pushSection = (title, items, noteWhenCut, mandatory = false) => {
     if (items.length === 0) return
-    const header = `${title}`
-    body.push(header)
-    used += header.length + 1
+    const lines = []
     let cut = 0
     for (const item of items) {
       const line = lineOf(item)
-      if (limit > 0 && used + line.length + 1 > limit) {
+      if (!mandatory && limit > 0 && used + line.length + 1 > limit) {
         cut += 1
         continue
       }
-      body.push(line)
+      lines.push(line)
       used += line.length + 1
     }
+    if (lines.length === 0) return
+    body.push(title)
+    used += title.length + 1
+    for (const line of lines) body.push(line)
     if (cut > 0 && noteWhenCut !== undefined) body.push(noteWhenCut(cut))
     body.push('')
   }
 
   pushSection('## 零、钉住（每轮必带）', pinned, (cut) =>
-    `（置顶条目还有 ${cut} 条超出预算没放下：调大 inject.maxChars，或把 inject.maxChars 设为 0）`)
+    `（置顶条目还有 ${cut} 条超出预算没放下：调大 inject.maxChars，或把 inject.maxChars 设为 0）`, true)
   pushSection('## 一、红线与硬要求', redline, (cut) =>
-    `（红线还有 ${cut} 条超出预算没放下：调大 inject.maxChars，或把 inject.maxChars 设为 0）`)
+    `（红线还有 ${cut} 条超出预算没放下：调大 inject.maxChars，或把 inject.maxChars 设为 0）`, true)
   pushSection('## 二、个性化首选', personalize, (cut) =>
     `（个性化条目还有 ${cut} 条超出预算没放下：调大 inject.maxChars，或把 inject.maxChars 设为 0）`)
   pushSection('## 三、背景参考', rest, (cut) =>
@@ -2247,15 +2218,19 @@ function cmdForget({ flags }) {
   const dim = typeof flags.dim === 'string' ? flags.dim : ''
   const all = flags.all === true || id === 'all'
   const inPending = flags.pending === true
+  const ids = typeof flags.ids === 'string'
+    ? flags.ids.split(',').map((x) => x.trim()).filter((x) => x.length > 0)
+    : []
 
-  if (!all && id === '' && key === '' && dim === '') {
-    die('用法：forget --id <id> | --key <key> | --dim <维度> | --all [--pending]')
+  if (!all && id === '' && key === '' && dim === '' && ids.length === 0) {
+    die('用法：forget --id <id> | --ids <id,id,...> | --key <key> | --dim <维度> | --all [--pending]')
   }
 
   const file = inPending ? p('pending.jsonl') : p('declarations.jsonl')
   const records = readJsonl(file)
   const hit = (r) => {
     if (all) return true
+    if (ids.length > 0 && ids.includes(r.id)) return true
     if (id !== '' && r.id === id) return true
     if (key !== '' && r.key === key) return true
     // --dim 只在额外给了 --key 之外的显式意图时才按维度清空，避免手滑清掉一整维
@@ -2278,12 +2253,18 @@ function declarationSelector(flags, name) {
   const key = typeof flags.key === 'string' ? flags.key : ''
   const dim = typeof flags.dim === 'string' ? flags.dim : ''
   const all = flags.all === true
-  if (!all && id === '' && key === '' && dim === '') {
-    die(`用法：${name} --id <id> | --key <key> | --dim <维度> | --all`)
+  // --ids a,b,c：面板多选一次性提交，只做一次快照、一次 rebuild。
+  // 逐条调用的写法会在 20 条以上时把恢复点的环转掉（历史上正是这么清空过画像）。
+  const ids = typeof flags.ids === 'string'
+    ? flags.ids.split(',').map((x) => x.trim()).filter((x) => x.length > 0)
+    : []
+  if (!all && id === '' && key === '' && dim === '' && ids.length === 0) {
+    die(`用法：${name} --id <id> | --ids <id,id,...> | --key <key> | --dim <维度> | --all`)
   }
   return {
     hit: (record) => {
       if (all) return true
+      if (ids.length > 0 && ids.includes(record.id)) return true
       if (id !== '' && record.id === id) return true
       if (key !== '' && record.key === key) return true
       if (dim !== '' && record.dim === dim) return true
@@ -2354,9 +2335,47 @@ function cmdUnpin({ flags }) {
 /** 既然记录是 append-only，改一条 = 先删后加：旧值进 changelog，便于回溯。 */
 function cmdEdit({ flags }) {
   const id = typeof flags.id === 'string' ? flags.id : ''
-  if (id.length === 0) die('用法：edit --id <id> [--fact 新内容] [--dim 维度] [--key key] [--weight 0..1] [--core true|false]')
+  const ids = typeof flags.ids === 'string'
+    ? flags.ids.split(',').map((x) => x.trim()).filter((x) => x.length > 0)
+    : []
+  if (id.length === 0 && ids.length === 0) {
+    die('用法：edit --id <id> [--fact 新内容] [--dim 维度] [--key key] [--weight 0..1] [--core true|false]\n     | edit --ids <id,id,...> [--core true|false] [--weight 0..1]')
+  }
   const config = loadConfig()
   const records = readJsonl(p('declarations.jsonl'))
+
+  // 批量改状态（面板「批量设为核心」）：一次快照、一次写盘、一次 rebuild。
+  // 逐条 edit 会各留一份快照，二十条就把恢复点的环转掉。
+  if (ids.length > 0) {
+    const rawFactBulk = typeof flags.fact === 'string' ? flags.fact.trim() : ''
+    if (rawFactBulk.length > 0) die('--ids 不能和 --fact 一起用：批量只改状态，正文请逐条改')
+    const hits = records.filter((r) => ids.includes(r.id))
+    if (hits.length === 0) die('没有匹配的条目')
+    const coreFlag = typeof flags.core === 'boolean'
+      ? flags.core
+      : flags.core === 'true' ? true : flags.core === 'false' ? false : undefined
+    const nextWeight = Number.isFinite(Number(flags.weight))
+      ? Number(flags.weight)
+      : Number.isFinite(Number(flags.confidence)) ? Number(flags.confidence) : NaN
+    const at = nowIso()
+    for (const record of hits) {
+      if (coreFlag !== undefined) record.core = coreFlag
+      if (Number.isFinite(nextWeight)) record.confidence = Math.min(1, Math.max(0, nextWeight))
+      record.editedAt = at
+      record.at = at
+    }
+    snapshotDeclarations('edit')
+    writeJsonl(p('declarations.jsonl'), records)
+    appendJsonl(p('changelog.jsonl'), { at, kind: 'edit', ids: hits.map((r) => r.id), core: coreFlag, weight: Number.isFinite(nextWeight) ? nextWeight : undefined })
+    rebuildQuietly()
+    const parts = []
+    if (coreFlag === true) parts.push('设为核心')
+    if (coreFlag === false) parts.push('取消核心')
+    if (Number.isFinite(nextWeight)) parts.push(`权重 ${nextWeight}`)
+    process.stdout.write(`已改 ${hits.length} 条（${parts.length > 0 ? parts.join('、') : '状态'}）\n（画像已刷新；改错了可以 restore 回滚）\n`)
+    return
+  }
+
   const record = records.find((r) => r.id === id)
   if (record === undefined) die(`没有这条声明：${id}`)
 
@@ -2392,6 +2411,8 @@ function cmdEdit({ flags }) {
   // 改内容也要过闸门：改坏了照样会污染注入块
   if (typeof flags.fact === 'string' && flags.fact.trim().length > 0) assertValid(record, config, flags)
 
+  // 改之前留一份：edit 以前没有快照，改错了只能靠 changelog 手抄回去。
+  snapshotDeclarations('edit')
   writeJsonl(p('declarations.jsonl'), records)
   appendJsonl(p('changelog.jsonl'), { at: record.editedAt, kind: 'edit', id, before, after: { ...record } })
   rebuildQuietly()
@@ -2424,10 +2445,18 @@ function cmdMerge({ flags }) {
   if (drop === undefined) die(`没有 id=${dropId} 的声明`)
   const merged = {
     ...keep,
+    // 被并进来的那条也是用户确认过的事实：置顶、核心这类「状态」要取并集，
+    // 否则「把 A 并进 B」会顺手把 A 上的置顶抹掉 —— 用户看到的是置顶莫名消失。
+    pinnedAt: keep.pinnedAt ?? drop.pinnedAt,
+    core: keep.core === true || drop.core === true,
     at: nowIso(),
     editedAt: nowIso(),
     mergedFrom: [...(Array.isArray(keep.mergedFrom) ? keep.mergedFrom : []), { id: drop.id, dim: drop.dim, fact: drop.fact }],
   }
+  // 只要有一边是活的，合并结果就是活的：合并不能让一条活跃条目凭空消失。
+  if (!(keep.retiredAt !== undefined && drop.retiredAt !== undefined)) delete merged.retiredAt
+  if (merged.pinnedAt === undefined) delete merged.pinnedAt
+  if (merged.core !== true) delete merged.core
   writeJsonl(p('declarations.jsonl'), records.filter((r) => r.id !== dropId).map((r) => (r.id === keepId ? merged : r)))
   appendJsonl(p('changelog.jsonl'), {
     at: nowIso(),
@@ -2448,7 +2477,12 @@ function cmdMerge({ flags }) {
  */
 function cmdDedupe({ flags }) {
   const config = loadConfig()
-  const records = readJsonl(p('declarations.jsonl')).filter((r) => typeof r?.fact === 'string' && r.fact.length > 0)
+  // 「先放下」的条目已经被用户请出画像，不再参与相似合并：
+  // 让它们当合并目标会把活跃条目吞掉（并进一条不进画像的记录里），
+  // 而且下次恢复时还会冒出重复。
+  const records = readJsonl(p('declarations.jsonl'))
+    .filter((r) => typeof r?.fact === 'string' && r.fact.length > 0)
+    .filter((r) => r.retiredAt === undefined)
   if (records.length < 2) {
     // --pairs 是机器可读契约：空库也要给合法 JSON，调用方不该为「没东西」写特例。
     if (flags.pairs === true) {
@@ -2585,6 +2619,9 @@ function cmdDedupe({ flags }) {
       fact: keepText,
       confidence: Math.max(...group.map((m) => Number(m.confidence ?? 0))),
       core: group.some((m) => m.core === true) ? true : winner.core,
+      // 组里只要有一条被置顶，合并结果就保持置顶：
+      // 「把 A 并进 B」不应该顺手把 A 上的置顶抹掉（用户看到的是置顶莫名消失）。
+      pinnedAt: group.find((m) => m.pinnedAt !== undefined)?.pinnedAt,
       at: nowIso(),
       editedAt: nowIso(),
       mergedFrom: [
@@ -2592,6 +2629,7 @@ function cmdDedupe({ flags }) {
         ...group.slice(1).map((m) => ({ id: m.id, dim: m.dim, fact: m.fact })),
       ],
     }
+    if (kept.pinnedAt === undefined) delete kept.pinnedAt
     merged.set(winner.id, kept)
     for (const loser of group.slice(1)) merged.set(loser.id, null)
   }

@@ -5,6 +5,25 @@ The portrait schema version is tracked separately and lives in `config.json`.
 
 ## Unreleased
 
+### v31 — state fields survive merging, batches take one snapshot
+
+Every bug fixed here has the same shape: the command exits 0, the panel shows no error, and the only way to notice is to compare **what you just did** with **what the profile now contains**. `tests/audit-11.mjs` reproduces all eight as regression checks.
+
+#### Fixed
+- **Pin could disappear after an unrelated update.** `buildDimensions()` read `pinned` / `core` from the newest record of a key group only. Pin an entry, then let the model (or a second `declare`) write a fresher record under the same key, and the pin was gone. Both flags are now taken as the **union over the group**: you pin "this fact", not "this version of the string".
+- **A new declaration could be merged into a retired record.** The write-path similarity merge did not skip `retiredAt` rows, so a fresh statement joined an entry that is not in the profile at all — the result was "I recorded it and the profile does not contain it", which is far harder to diagnose than a duplicate. Retired rows are no longer merge targets.
+- **`merge` dropped the状态 of the record being merged in.** `merged = { ...keep }` inherited only the kept side: merging a pinned entry into an unpinned one silently unpinned it, and merging a live entry into a retired one made the live entry vanish. Both flags are now unioned, and the result stays live unless **both** sides were retired.
+- **`dedupe --apply` did the same, and also scanned retired rows.** Group merging kept only the winner's `pinnedAt`, and retired records participated in clustering (so they could swallow live entries). The group's pin is now preserved, and retired records are excluded from the scan.
+- **Injection budget could cut the two sections that must never be cut.** `pushSection()` applied the character budget to every section, so with a small `inject.maxChars` the pinned and red-line sections lost their entries while their headers stayed — a block that reads as "your profile is broken". Those two sections are now `mandatory`, and a section with no surviving entry emits no header at all.
+- **`edit` had no snapshot.** A wrong edit could only be undone by hand from `changelog.jsonl`. It now stages a `declarations-edit-*` snapshot before writing.
+- **Bulk panel actions cost one CLI call, one snapshot and one rebuild per row.** Twenty-five rows produced twenty-five snapshots, which rotated older restore points out of the 20-slot ring — the same mechanism that wiped profiles three times earlier in this project. Bulk `先放下` / `批量置顶` / `批量删除` / `设为核心` now send `--ids a,b,c` and do a single snapshot, single write, single rebuild.
+- **An explicit `--key` was not an identity.** `declare --key taste.live` followed by `declare --key taste.old` with similar wording still merged across two deliberately distinct keys, keeping the first key and overwriting its text. Explicit, differing keys now block the similarity merge.
+
+#### Changed
+- `retire` / `unretire` / `pin` / `unpin` / `forget` accept `--ids a,b,c`; `edit --ids …` accepts state flags only (`--core`, `--weight`) and refuses `--fact`.
+- `index.js` action handlers accept `ids` and pass `--dim` through for `unretire` / `unpin` (the CLI already supported it).
+- Removed two dead duplicate implementations (`findMergeGroups`, `mergeGroupRecords`) left over from before the dedupe rewrite — they were never called, and a second copy of the merge rules is exactly how `explain` and injection drifted apart in v26.
+
 ### v30 — pinned entries, soft retire, before/after on edit
 
 #### Added

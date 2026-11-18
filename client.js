@@ -637,7 +637,7 @@ window.__ModuleLoader__.load({
             style: styles.button,
             disabled: busy,
             onClick: async () => {
-              for (const id of pickedIds) await run({ action: 'edit', id, core: true }, { silent: true })
+              await run({ action: 'edit', ids: pickedIds.join(','), core: true })
               setPicked({})
             },
           }, '设为核心'),
@@ -647,7 +647,7 @@ window.__ModuleLoader__.load({
             title: '从画像里拿掉，但记录留着（随时能恢复）',
             onClick: async () => {
               const total = pickedIds.length
-              for (const id of pickedIds) await run({ action: 'retire', id }, { silent: true })
+              await run({ action: 'retire', ids: pickedIds.join(',') })
               setPicked({})
               if (typeof notify === 'function') notify(`已把 ${total} 条先放下（记录留着，随时可恢复）`)
             },
@@ -657,7 +657,7 @@ window.__ModuleLoader__.load({
             disabled: busy,
             title: '每轮对话都带上这几条',
             onClick: async () => {
-              for (const id of pickedIds) await run({ action: 'pin', id }, { silent: true })
+              await run({ action: 'pin', ids: pickedIds.join(',') })
               setPicked({})
             },
           }, '批量置顶'),
@@ -673,7 +673,7 @@ window.__ModuleLoader__.load({
               }
               const total = pickedIds.length
               setBulkArmed(false)
-              for (const id of pickedIds) await run({ action: 'forget', id }, { silent: true })
+              await run({ action: 'forget', ids: pickedIds.join(',') })
               setPicked({})
               if (typeof notify === 'function') notify(`已删除 ${total} 条。删错了也不要紧：到「备份与重置」→「恢复点」可整批还原。`)
             },
