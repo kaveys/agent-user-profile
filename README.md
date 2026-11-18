@@ -7,7 +7,7 @@
 
 不想用时，当场说一句「这次别用画像」，它立刻停手，并告诉你「本次未结合画像」。
 
-**[看 89 秒介绍片](docs/video/agent-user-profile.mp4)**（中文配音，讲它是干什么的，不讲代码）· [字幕](docs/video/agent-user-profile.srt) · [旁白全文](docs/video/agent-user-profile-narration.txt) · [English README](README.en.md)
+**[看 74 秒介绍片](docs/video/agent-user-profile.mp4)**（中文配音，讲它是干什么的，不讲代码）· [字幕](docs/video/agent-user-profile.srt) · [旁白全文](docs/video/agent-user-profile-narration.txt) · [English README](README.en.md)
 
 ![概览](docs/screenshots/01-overview.png)
 

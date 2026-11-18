@@ -5,6 +5,19 @@ The portrait schema version is tracked separately and lives in `config.json`.
 
 ## Unreleased
 
+### v27 — the voice finally sounds spoken (74.4s)
+
+#### Changed
+- Narration voice switched from Kokoro-82M to **ChatTTS**: a conversational model, so pitch, breath and pauses move the way a person talks instead of reading a script.
+- Narration rewritten for the ear — shorter clauses, fewer parallel structures, spoken connectives（「你说过，你喜欢简单一点。第二天，它又开始绕圈子。」）. Same content, ~same length on screen.
+- `scripts/tts_chattts.py` (new): ChatTTS engine; a seed *is* the voice (`torch.manual_seed` → `sample_random_speaker()`), so no embedding file has to be shipped and the same seed always renders the same voice. Seed **3** is the female narrator; 2 and 9 are the other female candidates.
+- `scripts/tts.py` gains the `chattts` engine; `scripts/build-trailer.ps1` gains `-Engine chattts -Seed 3 -Tempo 0.9`（`atempo` slows ChatTTS down 10 % without changing pitch).
+- Trailer: 8 scenes, **74.4 s**（was 88.9 s — ChatTTS speaks faster); `agent-user-profile.srt` and `-narration.txt` regenerated; README duration 89 → 74 s.
+- `scripts/trailer-build/voice-audition.mp3`（gitignored）holds the same line read by five voices for A/B listening: chattts seed3 / seed2 / edge Xiaoxiao / edge Xiaoyi / kokoro.
+
+#### Notes
+- ChatTTS is not a dependency of the plugin: it only matters when regenerating the trailer（`pip install ChatTTS vocos vector_quantize_pytorch`）, and `HF_ENDPOINT=https://hf-mirror.com` helps when huggingface.co is unreachable.
+
 ### v26.1 — intro video refreshed (88.9s, one new scene)
 
 #### Changed

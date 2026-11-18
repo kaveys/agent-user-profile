@@ -7,9 +7,11 @@
 
 param(
   [string]$OutFile = 'docs/video/agent-user-profile.mp4',
-  [string]$Engine  = 'kokoro',
-  [string]$Voice   = 'zf_xiaoxiao',
+  [string]$Engine  = 'chattts',
+  [string]$Voice   = '',
   [string]$Speed   = '0.92',
+  [string]$Seed    = '3',
+  [string]$Tempo   = '0.9',
   [switch]$NoTtsRefresh
 )
 
@@ -135,7 +137,7 @@ function Draw-Subtitle($g, [string]$s) {
 $Scenes = @(
   @{
     Name = '01-hook'
-    Narration = '你有没有过这种感觉：同一个 AI，昨天刚说过的话，今天它全忘了。'
+    Narration = '你有没有遇到过这种事。同一个 AI，昨天刚说过的话，今天它就不记得了。'
     Subtitle  = '同一个 AI，换个对话就像换了个人'
     Draw = {
       param($g)
@@ -146,7 +148,7 @@ $Scenes = @(
   },
   @{
     Name = '02-pain'
-    Narration = '你告诉它你喜欢简洁的东西，第二天它又开始啰嗦；你说过别动那个文件夹，它还是会动。每次开新对话，都得从头解释一遍。'
+    Narration = '你说过，你喜欢简单一点。第二天，它又开始绕圈子。你说那个文件夹别动，它还是动了。每换一个新对话，你就得从头再讲一遍。'
     Subtitle  = '每换一个对话，就得重新交代一遍，很累'
     Draw = {
       param($g)
@@ -170,7 +172,7 @@ $Scenes = @(
   },
   @{
     Name = '03-what'
-    Narration = '现在，有一份关于你的说明书。一次写清楚，往后每次开口之前，它都会先看一眼。'
+    Narration = '现在，有一份关于你的说明书。说一次，写清楚。以后每次开口之前，它都会先看一眼。'
     Subtitle  = '一次说清，往后每次开口之前它都会先看一眼'
     Draw = {
       param($g)
@@ -192,7 +194,7 @@ $Scenes = @(
   },
   @{
     Name = '04-categories'
-    Narration = '里面记的是这些：你是谁、你喜欢什么、你习惯怎么做、你绝对不要什么。分成十类，每一条都能看、能改、能删。'
+    Narration = '里面写的是：你是谁，你喜欢什么，你习惯怎么做，还有你绝对不想要什么。一共十类。每一条，你都能看，能改，也能删。'
     Subtitle  = '分成十类，每条都能看、能改、能删'
     Draw = {
       param($g)
@@ -221,7 +223,7 @@ $Scenes = @(
   },
   @{
     Name = '05-control'
-    Narration = '不满意的那条，点一下就能调轻重；说错了就删掉，删错了随时还原。它还会告诉你，这次为什么按你的习惯来。'
+    Narration = '哪条不合适，点一下，就能调轻重。说错了，删掉。删错了，随时还原。它还会告诉你，这次为什么这么做。'
     Subtitle  = '不合适的那条调轻或删掉，删错了一键还原'
     Draw = {
       param($g)
@@ -254,7 +256,7 @@ $Scenes = @(
   },
   @{
     Name = '05b-tidy'
-    Narration = '记得多了，它自己还会整理：同一件事记了两遍的，自动合成一条。你换一个 AI 工具，也能把「它记得的你」整段搬过来。'
+    Narration = '记得多了，它自己也会整理。同一件事记了两遍，合成一条。哪天你换个 AI 用，也能把这些整段搬过去。'
     Subtitle  = '重复的自动合并 · 换工具也能带走'
     Draw = {
       param($g)
@@ -285,7 +287,7 @@ $Scenes = @(
   },
   @{
     Name = '06-payoff'
-    Narration = '于是新对话的第一句，它就已经懂你了。万一这次不想让它参考，说一句「这次别用我的资料」，它立刻停。'
+    Narration = '所以新对话的第一句话，它已经知道你要什么了。哪天你不想让它参考，就说一句：这次别用我的资料。它就停。'
     Subtitle  = '同一句话，它直接给到你要的样子'
     Draw = {
       param($g)
@@ -306,7 +308,7 @@ $Scenes = @(
   },
   @{
     Name = '07-outro'
-    Narration = '开源、免费，数据只留在你自己的电脑里。想试试，搜 agent user profile 就能找到。'
+    Narration = '开源，免费。数据只留在你自己的电脑里。想试试，搜索 agent user profile。'
     Subtitle  = '开源免费 · 数据只留在你自己的电脑里'
     Draw = {
       param($g)
@@ -327,21 +329,37 @@ $Scenes = @(
 
 # ---------------------------------------------------------------- 配音
 $Py = Get-Command python -ErrorAction SilentlyContinue
+# ChatTTS 可能装在单独的解释器里，用 CHATTTS_PY 指过去（默认跟系统 python 同一个）
+$ChatPy = if ($env:CHATTTS_PY) { $env:CHATTTS_PY } else { if ($Py) { $Py.Source } else { 'python' } }
 function Test-Tts {
   param([string]$Which)
-  if (-not $Py) { return $false }
-  $mod = if ($Which -eq 'kokoro') { 'kokoro' } else { 'edge_tts' }
-  & $Py -c "import $mod" 2>$null | Out-Null
-  return ($LASTEXITCODE -eq 0)
+  switch ($Which) {
+    'chattts' {
+      if (-not (Test-Path $ChatPy)) { return $false }
+      & $ChatPy -c "import ChatTTS, vocos" 2>$null | Out-Null
+      return ($LASTEXITCODE -eq 0)
+    }
+    default {
+      if (-not $Py) { return $false }
+      $mod = if ($Which -eq 'kokoro') { 'kokoro' } else { 'edge_tts' }
+      & $Py -c "import $mod" 2>$null | Out-Null
+      return ($LASTEXITCODE -eq 0)
+    }
+  }
 }
-$useKokoro = ($Engine -eq 'kokoro') -and (Test-Tts 'kokoro') -and (-not $NoTtsRefresh)
-$useEdge   = (-not $useKokoro) -and ($Engine -eq 'edge') -and (Test-Tts 'edge') -and (-not $NoTtsRefresh)
+$useChat   = ($Engine -eq 'chattts') -and (Test-Tts 'chattts') -and (-not $NoTtsRefresh)
+$useKokoro = (-not $useChat) -and ($Engine -eq 'kokoro') -and (Test-Tts 'kokoro') -and (-not $NoTtsRefresh)
+$useEdge   = (-not $useChat) -and (-not $useKokoro) -and ($Engine -eq 'edge') -and (Test-Tts 'edge') -and (-not $NoTtsRefresh)
 
 # 复用仓库里的 scripts/tts.py，不在构建目录里另写一份
 $ttsPy = Join-Path $Root 'scripts/tts.py'
-if (($useKokoro -or $useEdge) -and -not (Test-Path $ttsPy)) { throw "缺少 $ttsPy" }
+if (($useChat -or $useKokoro -or $useEdge) -and -not (Test-Path $ttsPy)) { throw "缺少 $ttsPy" }
 
-Write-Host ("配音引擎：" + $(if ($useKokoro) { "kokoro 本地模型 ($Voice, speed $Speed)" } elseif ($useEdge) { "edge-tts ($Voice, speed $Speed)" } else { "系统语音 Huihui" }))
+$engineLine = if ($useChat) { "ChatTTS 对话式模型 (seed $Seed)" }
+  elseif ($useKokoro) { "kokoro 本地模型 ($Voice, speed $Speed)" }
+  elseif ($useEdge) { "edge-tts ($Voice, speed $Speed)" }
+  else { "系统语音 Huihui" }
+Write-Host ("配音引擎：" + $engineLine)
 
 # ---------------------------------------------------------------- 逐场渲染
 $segments = @(); $srts = @(); $timeline = @()
@@ -361,21 +379,26 @@ foreach ($scene in $Scenes) {
     $gfx.Dispose(); $bmp.Save($png, [Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
   }
 
-  if ($useKokoro -or $useEdge) {
+  if ($useChat -or $useKokoro -or $useEdge) {
     if (-not (Test-Path $wav)) {
       Set-Content $txt $scene.Narration -Encoding UTF8
-      if ($useKokoro) {
+      if ($useChat) {
+        & $ChatPy $ttsPy $txt $wav chattts $Voice $Seed
+      } elseif ($useKokoro) {
         & $Py $ttsPy $txt $wav kokoro $Voice $Speed
       } else {
         & $Py $ttsPy $txt $mp3 edge $Voice $Speed
       }
       if ($LASTEXITCODE -ne 0) { throw "配音失败：$($scene.Name)" }
+      # ChatTTS 读得偏快，用 atempo 放慢而不改音高（0.9 ≈ 慢 10%）
+      $tempoArgs = @()
+      if ([double]$Tempo -ne 1.0) { $tempoArgs = @('-filter:a', "atempo=$Tempo") }
       if (Test-Path $mp3) {
         # 本地模型不可用时 tts.py 会退回 edge 并留下 mp3
-        & $Ffmpeg -y -loglevel error -i $mp3 -ar 44100 -ac 1 $wav
+        & $Ffmpeg -y -loglevel error -i $mp3 @tempoArgs -ar 44100 -ac 1 $wav
       } else {
         $tmp44 = Join-Path $Work ("{0}.44k.wav" -f $scene.Name)
-        & $Ffmpeg -y -loglevel error -i $wav -ar 44100 -ac 1 $tmp44
+        & $Ffmpeg -y -loglevel error -i $wav @tempoArgs -ar 44100 -ac 1 $tmp44
         Move-Item -Force $tmp44 $wav
       }
       if (-not (Test-Path $wav)) { throw "配音文件未生成：$($scene.Name)" }
