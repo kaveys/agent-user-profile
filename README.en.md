@@ -1,5 +1,12 @@
 # agent-user-profile
 
+[![ci](https://github.com/kaveys/agent-user-profile/actions/workflows/ci.yml/badge.svg)](https://github.com/kaveys/agent-user-profile/actions/workflows/ci.yml)
+[![version](https://img.shields.io/github/package-json/v/kaveys/agent-user-profile)](CHANGELOG.md)
+[![license](https://img.shields.io/github/license/kaveys/agent-user-profile)](LICENSE)
+[![node](https://img.shields.io/badge/node-%3E%3D20-4D6BFE)](package.json)
+[![dependencies](https://img.shields.io/badge/dependencies-none-success)](package.json)
+[![data](https://img.shields.io/badge/data-stays%20on%20your%20machine-4D6BFE)](#what-it-refuses-to-remember)
+
 **A "manual about you" for AI assistants.**
 
 Every new chat starts the same way: you re-explain yourself — I'm a student, I like clean interfaces, don't touch my project folder, give me the conclusion first.
@@ -97,16 +104,17 @@ A standard MCP server — any MCP client can read the same profile.
 - [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) — what degrades on older hosts
 - [docs/POSITIONING.md](docs/POSITIONING.md) — how it differs from memory libraries, and how to port it
 - [CONTRIBUTING.md](CONTRIBUTING.md) — house rules and the checks to run
+- [SUPPORT.md](SUPPORT.md) — "it does nothing after install", "my list is empty", "I need to roll back"
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — how we talk to each other here
 - [SECURITY.md](SECURITY.md) — where data lives and the known boundaries
 - [CHANGELOG.md](CHANGELOG.md) — what changed in every version, and why
 
 Layout: `bin/profile.mjs` (data layer CLI), `lib/` (two pure-function modules for similarity and relevance), `index.js` (host-side capture + injection), `client.js` (settings UI), `mcp/server.mjs` (MCP surface). Zero dependencies, no build step.
 
 ```bash
-node tests/selftest.mjs
-node tests/audit-1.mjs
-node tests/audit-10.mjs
-node scripts/verify-install.mjs
+npm test                     # everything: syntax, 14 audits, unit, render, compat, e2e, install
+npm run test:quick           # while iterating: syntax + unit + determinism
+npm run test:list            # print the steps without running them
 ```
 
 ## License

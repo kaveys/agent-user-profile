@@ -1,0 +1,12 @@
+# issue 入口的统一配置：空 issue 关掉，先引导去看文档和排障清单
+blank_issues_enabled: false
+contact_links:
+  - name: 先看排障清单（装完没反应 / 画像是空的 / 想回滚）
+    url: https://github.com/kaveys/agent-user-profile/blob/main/SUPPORT.md
+    about: 四条常见问题，八成能自己解决
+  - name: 兼容性与降级说明
+    url: https://github.com/kaveys/agent-user-profile/blob/main/docs/COMPATIBILITY.md
+    about: 换了宿主版本后哪些功能会降级，`profile doctor` 怎么看
+  - name: 报告安全问题（不要开公开 issue）
+    url: https://github.com/kaveys/agent-user-profile/blob/main/SECURITY.md
+    about: 数据落在哪、哪些边界已知、怎么私下反馈

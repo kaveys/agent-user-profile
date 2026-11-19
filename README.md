@@ -1,5 +1,12 @@
 # agent-user-profile
 
+[![ci](https://github.com/kaveys/agent-user-profile/actions/workflows/ci.yml/badge.svg)](https://github.com/kaveys/agent-user-profile/actions/workflows/ci.yml)
+[![version](https://img.shields.io/github/package-json/v/kaveys/agent-user-profile)](CHANGELOG.md)
+[![license](https://img.shields.io/github/license/kaveys/agent-user-profile)](LICENSE)
+[![node](https://img.shields.io/badge/node-%3E%3D20-4D6BFE)](package.json)
+[![依赖](https://img.shields.io/badge/依赖-零依赖-success)](package.json)
+[![数据](https://img.shields.io/badge/数据-只在本机-4D6BFE)](#它不记什么)
+
 **给 AI 装一份「关于你」的说明书。**
 
 你大概遇到过这种情况：每开一个新对话，都要从头说一遍——我是学生、我喜欢简洁的界面、别动我的项目文件夹、回答先给结论。
@@ -124,7 +131,9 @@ node mcp/server.mjs
 - [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) — 换了宿主版本哪些功能会降级
 - [docs/POSITIONING.md](docs/POSITIONING.md) — 与同类项目的坐标、以及移植到别的宿主要做什么
 - [CONTRIBUTING.md](CONTRIBUTING.md) — 五条硬规矩 + 提交前要跑的检查
-- [SECURITY.md](SECURITY.md) — 数据落在哪、哪些边界已知
+- [SUPPORT.md](SUPPORT.md) — 装完没反应、画像是空的、想回滚：四条常见问题的处理办法
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — 在这里怎么说话、怎么提意见
+- [SECURITY.md](SECURITY.md) — 数据落在哪、哪些边界已知、怎么私下反馈
 - [CHANGELOG.md](CHANGELOG.md) — 每一版改了什么、为什么
 
 代码结构：`bin/profile.mjs` 是数据层（一个命令行工具），`lib/` 是两个纯函数模块（判定相似与相关），`index.js` 是宿主侧的采集与注入，`client.js` 是设置页界面，`mcp/server.mjs` 是对外接口。全部零依赖、没有构建步骤。
@@ -132,9 +141,16 @@ node mcp/server.mjs
 测试与自检（不需要网络，也不需要宿主）：
 
 ```bash
+npm test                     # 全量：语法 + 14 轮排查 + 单元 + 渲染 + 兼容 + 端到端 + 安装体检
+npm run test:quick           # 改小东西时用：语法 + 单元 + 决定论
+npm run test:list            # 只列会跑哪些步骤
+```
+
+改代码前想知道每个文件盯什么，看 [DESIGN.md](DESIGN.md)；只想手敲单个测试：
+
+```bash
 node tests/selftest.mjs      # 单元级
-node tests/audit-1.mjs       # 十轮对抗排查，各盯一个角度
-node tests/audit-10.mjs
+node tests/audit-10.mjs      # 决定论与幂等
 node scripts/verify-install.mjs
 ```
 

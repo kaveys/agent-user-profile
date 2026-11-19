@@ -5,6 +5,18 @@ The portrait schema version is tracked separately and lives in `config.json`.
 
 ## Unreleased
 
+### chore — one test entry, support docs, CI parity
+
+Nothing here changes behaviour; it changes how easy this repo is to pick up, run and trust.
+
+- **One command runs everything.** `npm test` → `node scripts/test-all.mjs`: syntax on 9 files, then all 14 audits, `selftest`, `render`, `compat`, `e2e --cli-only`, `verify-install`. It discovers `tests/audit-N.mjs` by pattern instead of a hardcoded list, so audit 15 will not be silently skipped. `npm run test:quick` is the 15-second subset, `npm run test:list` prints the steps without running them.
+- **CI and `npm test` now cover the same files.** `scripts/test-all.mjs` was missing from the CI syntax step, and three `node --check tests/audit-1x.mjs` lines were misindented — cosmetic today, a silent gap tomorrow.
+- **`SUPPORT.md`.** Four failure modes that account for nearly every "it does nothing" report: not restarted, fewer than 3 entries, `explain` for "why wasn't it carried", `snapshots`/`restore` for "I broke it".
+- **`CODE_OF_CONDUCT.md`, `.editorconfig`, `.nvmrc`, PR template, issue-template `config.yml`, `dependabot.yml`, `release.yml`.** The boring files that make a repository legible: issue links point at SUPPORT/COMPATIBILITY/SECURITY before an empty issue is opened, dependabot watches Actions (the only ecosystem here — there are no npm dependencies), and release notes group by label.
+- **Badges and entry points in both READMEs** — CI, version, license, Node floor, zero dependencies, "data stays on your machine".
+
+## 0.5.2 — 2026-11-19
+
 ### v37 — data survives dedupe/import/merge, docs match reality
 
 Three sub-agents reviewed this plugin cold, without any of the authoring context: one followed the README as a first-time user, one audited data consistency and field propagation, one audited the privacy contract. Their reports overlapped on nothing, which is how the list below got this long. Every item was reproduced by hand before being fixed — a report is a claim, not a fact.

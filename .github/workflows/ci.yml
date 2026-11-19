@@ -47,9 +47,10 @@ jobs:
           node --check tests/audit-9.mjs
           node --check tests/audit-10.mjs
           node --check tests/audit-11.mjs
-        node --check tests/audit-12.mjs
-        node --check tests/audit-13.mjs
-        node --check tests/audit-14.mjs
+          node --check tests/audit-12.mjs
+          node --check tests/audit-13.mjs
+          node --check tests/audit-14.mjs
+          node --check scripts/test-all.mjs
 
       - name: Unit tests (storage / conflicts / injection)
         run: node tests/selftest.mjs

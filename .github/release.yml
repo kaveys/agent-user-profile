@@ -1,0 +1,28 @@
+# 自动生成 Release Notes 的分类规则（GitHub「Generate release notes」按这里归类）
+changelog:
+  categories:
+    - title: 数据安全与隐私
+      labels:
+        - security
+        - privacy
+    - title: 修 Bug
+      labels:
+        - bug
+        - fix
+    - title: 新功能
+      labels:
+        - feature
+        - enhancement
+    - title: 文档
+      labels:
+        - docs
+    - title: 测试与 CI
+      labels:
+        - test
+        - ci
+    - title: 依赖
+      labels:
+        - dependencies
+    - title: 其它
+      labels:
+        - '*'

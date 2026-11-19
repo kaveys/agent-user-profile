@@ -13,15 +13,17 @@ Thanks for looking. This project is small on purpose: one storage CLI, one host 
 ## Before opening a PR
 
 ```bash
-node --check index.js && node --check client.js && node --check bin/profile.mjs
-node tests/selftest.mjs
+npm test                  # the whole suite: syntax + 14 audits + unit + render + compat + e2e + install
+```
+
+All of it must be green. `npm run test:quick` is the fast subset while iterating (syntax + `selftest` + `audit-10`, ~15 s). `npm run test:list` prints the exact steps without running them, so you can run one alone:
+
+```bash
 node tests/e2e.mjs          # starts its own temp HOME; the HTTP part needs a running DSH
-node tests/audit-1.mjs
-node tests/render.mjs
 node scripts/verify-install.mjs
 ```
 
-All five must be green. If you change rendered text in the panel, update `tests/render.mjs` assertions in the same commit — they exist precisely because `node --check` cannot see a broken `map()`.
+If you change rendered text in the panel, update `tests/render.mjs` assertions in the same commit — they exist precisely because `node --check` cannot see a broken `map()`.
 
 ## Adding a dimension
 

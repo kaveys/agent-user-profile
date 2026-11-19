@@ -2,7 +2,6 @@
   "name": "dsh-user-profile",
   "version": "0.5.2",
   "private": true,
-  "type": "module",
   "description": "Agent user-profile layer: distill durable preferences into a weighted portrait, overlay it on every task, and let the user opt out for a single turn.",
   "keywords": [
     "agent",
@@ -26,22 +25,29 @@
   "bugs": {
     "url": "https://github.com/kaveys/agent-user-profile/issues"
   },
+  "type": "module",
   "main": "index.js",
   "bin": {
     "dsh-profile": "./bin/profile.mjs"
   },
   "files": [
+    "CHANGELOG.md",
+    "CODE_OF_CONDUCT.md",
     "DESIGN.md",
     "LICENSE",
     "README.md",
+    "SECURITY.md",
+    "SUPPORT.md",
     "bin/profile.mjs",
     "client.js",
     "cordis.patch.yml",
     "docs/COMPATIBILITY.md",
     "docs/POSITIONING.md",
+    "docs/screenshots",
     "index.js",
     "lib",
-    "mcp/server.mjs"
+    "mcp/server.mjs",
+    "screenshots.json"
   ],
   "exports": {
     ".": "./index.js",
@@ -61,5 +67,12 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "scripts": {
+    "test": "node scripts/test-all.mjs",
+    "test:quick": "node scripts/test-all.mjs --quick",
+    "test:list": "node scripts/test-all.mjs --list",
+    "verify:install": "node scripts/verify-install.mjs",
+    "doctor": "node bin/profile.mjs doctor"
   }
 }

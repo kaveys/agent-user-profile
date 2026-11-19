@@ -1,0 +1,25 @@
+# 编辑器统一设置：只为少出无意义的 diff，不改变任何既有文件的内容
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.md]
+# Markdown 里行尾两个空格是换行，别被编辑器吃掉
+trim_trailing_whitespace = false
+
+[*.ps1]
+indent_size = 4
+
+[*.{yml,yaml}]
+indent_size = 2
+
+# 这些文件是原样字节，编辑器不要碰
+[*.{png,jpg,jpeg,webp,mp4,srt}]
+insert_final_newline = false
+trim_trailing_whitespace = false

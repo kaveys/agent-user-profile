@@ -1,0 +1,15 @@
+version: 2
+
+# 本项目零运行时依赖，npm 生态没有东西可升级；
+# 需要盯的只有 GitHub Actions 的版本（checkout / setup-node 之类）。
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: chore(ci)
+    labels:
+      - dependencies
+      - ci
